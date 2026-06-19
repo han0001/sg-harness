@@ -13,6 +13,7 @@ A Claude Code workflow harness that splits a large task into isolated steps and 
 - `skills/sg-phase/` — **decompose + execute** phase: splits `plan.md` into steps and runs one isolated claude session per step via `scripts/execute.py` (the orchestrator). Tests live in `scripts/test_execute.py`.
 - `skills/sg-source-of-truth/` — **knowledge-sync** phase: harvests decisions from `plan.md` + the git diff into the permanent docs (e.g. this file).
 - `hooks/hooks.json` — PreToolUse Bash guard that blocks `rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`.
+- `.claude-plugin/plugin.json` + `marketplace.json` — plugin manifest and single-plugin marketplace (`source: "."`); `skills/` and `hooks/` are auto-discovered from the plugin root. Install: `/plugin marketplace add han0001/sg-harness`.
 
 ## Non-Goals (things we deliberately do NOT do — check new ideas against this list FIRST)
 
