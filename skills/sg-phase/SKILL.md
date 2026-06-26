@@ -134,12 +134,28 @@ npm test        # tests pass
 
 ### D. Execute
 
-Once the step files are created and approved, run the executor to execute the steps sequentially.
+Once the step files are created and approved, run the executor. **Before running, ask the user which reporting mode they want.** Both modes run the steps sequentially and self-correct identically — the only difference is how progress surfaces, and neither pauses to ask mid-run (report-only):
 
-> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, and **after getting approval**, invoke it via Bash:
+- **Per-step (live)** — run one step at a time so each step's result is reported back into this chat the moment it finishes. Best for watching progress; costs roughly one short chat turn per step.
+- **One-shot** — run the whole phase in a single call and report only when it finishes (the original behavior). Quietest; best for large phases where per-step reporting would be noise.
+
+> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, and **after getting approval**, invoke it via Bash.
+
+**If the user picks per-step — this session drives the while-loop, not execute.py:**
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name}        # run sequentially
+python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once          # run the next pending step only
+python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once --push    # ... pushes after the final step
+```
+
+1. Run `execute.py {dir} --once`. It runs exactly one pending step and exits.
+2. Relay the `✓ Step N/M … — {summary}` and `Next ▶ …` lines it printed as a one-line progress report. **Do NOT read `step{N}-output.json`** (the child's full stdout — large and unnecessary); the printed summary is enough.
+3. If a `Next ▶` step remains and no error/blocked occurred, repeat from 1. When it prints `All steps completed!`, stop.
+
+**If the user picks one-shot:**
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name}        # run the whole phase
 python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --push  # run, then push
 ```
 

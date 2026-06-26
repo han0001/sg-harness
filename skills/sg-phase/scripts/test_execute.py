@@ -565,3 +565,31 @@ class TestCheckBlockers:
         with pytest.raises(SystemExit) as exc_info:
             inst._check_blockers()
         assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# --once mode (per-step execution)
+# ---------------------------------------------------------------------------
+
+class TestExecuteOnce:
+    def test_once_runs_only_one_step(self, executor):
+        # The fixture has step 2 pending; flip step 1 back so two steps are pending.
+        idx = executor._read_json(executor._index_file)
+        idx["steps"][1]["status"] = "pending"
+        executor._write_json(executor._index_file, idx)
+
+        # Stub the real runner so no child `claude` is spawned — just mark the step done.
+        def fake_run(step, guardrails):
+            data = executor._read_json(executor._index_file)
+            for s in data["steps"]:
+                if s["step"] == step["step"]:
+                    s["status"] = "completed"
+            executor._write_json(executor._index_file, data)
+        executor._execute_single_step = fake_run
+
+        all_done = executor._execute_all_steps("", once=True)
+
+        still = [s for s in executor._read_json(executor._index_file)["steps"]
+                 if s["status"] == "pending"]
+        assert len(still) == 1      # ran exactly one step; one remains
+        assert all_done is False    # not done → run() will not finalize
