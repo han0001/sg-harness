@@ -101,14 +101,15 @@ class StepExecutor:
         self._phase_name = idx.get("phase", phase_dir_name)
         self._total = len(idx["steps"])
 
-    def run(self):
+    def run(self, once: bool = False):
         self._print_header()
         self._check_blockers()
         self._checkout_branch()
         guardrails = self._load_guardrails()
         self._ensure_created_at()
-        self._execute_all_steps(guardrails)
-        self._finalize()
+        all_done = self._execute_all_steps(guardrails, once=once)
+        if all_done:
+            self._finalize()
 
     # --- timestamps ---
 
@@ -345,7 +346,11 @@ class StepExecutor:
                         s["completed_at"] = ts
                 self._write_json(self._index_file, index)
                 self._commit_step(step_num, step_name)
-                print(f"  ✓ Step {step_num}: {step_name} [{elapsed}s]")
+                summary = next((s.get("summary", "") for s in index["steps"] if s["step"] == step_num), "")
+                nxt = next((s for s in index["steps"] if s["status"] == "pending"), None)
+                print(f"  ✓ Step {step_num}/{self._total - 1}: {step_name} [{elapsed}s] — {summary}")
+                if nxt:
+                    print(f"    Next ▶ Step {nxt['step']} {nxt['name']}")
                 return True
 
             if status == "blocked":
@@ -387,13 +392,15 @@ class StepExecutor:
 
         return False  # unreachable
 
-    def _execute_all_steps(self, guardrails: str):
+    def _execute_all_steps(self, guardrails: str, once: bool = False) -> bool:
+        """Run pending steps. Returns True when no pending steps remain (phase done).
+        In once mode, runs a single step and returns whether that was the last one."""
         while True:
             index = self._read_json(self._index_file)
             pending = next((s for s in index["steps"] if s["status"] == "pending"), None)
             if pending is None:
                 print("\n  All steps completed!")
-                return
+                return True
 
             step_num = pending["step"]
             for s in index["steps"]:
@@ -403,6 +410,11 @@ class StepExecutor:
                     break
 
             self._execute_single_step(pending, guardrails)
+
+            if once:
+                remaining = self._read_json(self._index_file)
+                more = any(s["status"] == "pending" for s in remaining["steps"])
+                return not more
 
     def _finalize(self):
         index = self._read_json(self._index_file)
@@ -434,9 +446,10 @@ def main():
     parser = argparse.ArgumentParser(description="Harness Step Executor")
     parser.add_argument("phase_dir", help="Phase directory name (e.g. 20260616_task-name)")
     parser.add_argument("--push", action="store_true", help="Push branch after completion")
+    parser.add_argument("--once", action="store_true", help="Run only the next pending step, then exit")
     args = parser.parse_args()
 
-    StepExecutor(args.phase_dir, auto_push=args.push).run()
+    StepExecutor(args.phase_dir, auto_push=args.push).run(once=args.once)
 
 
 if __name__ == "__main__":
