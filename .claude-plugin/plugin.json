@@ -1,7 +1,6 @@
 {
   "name": "sg-harness",
   "description": "Design (grill) → decomposition → sequential execution → knowledge sync workflow. Splits plan.md into steps and execute.py drives an isolated claude session per step.",
-  "version": "0.1.0",
   "author": { "name": "han0001" },
   "homepage": "https://github.com/han0001/sg-harness",
   "repository": "https://github.com/han0001/sg-harness",
