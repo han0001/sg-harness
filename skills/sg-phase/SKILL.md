@@ -134,30 +134,20 @@ npm test        # tests pass
 
 ### D. Execute
 
-Once the step files are created and approved, run the executor. **Before running, ask the user which reporting mode they want.** Both modes run the steps sequentially and self-correct identically — the only difference is how progress surfaces, and neither pauses to ask mid-run (report-only):
+Once the step files are created and approved, run the executor. **There is one reporting mode and you do not ask the user to choose it.** This session drives the run **automatically from the first pending step to the last** — it never pauses mid-run to ask "run the next step?". After each step finishes it emits a **one-line progress report** into this chat (`✓ Step N/M … — {summary}` + `Next ▶ …`), so the user watches progress live without lifting a finger. The run only stops on **error** or **blocked** (see Error recovery below).
 
-- **Per-step (live)** — run one step at a time so each step's result is reported back into this chat the moment it finishes. Best for watching progress; costs roughly one short chat turn per step.
-- **One-shot** — run the whole phase in a single call and report only when it finishes (the original behavior). Quietest; best for large phases where per-step reporting would be noise.
+> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, get the **one** safety approval (it disables permission checks and auto-commits — see Safety below), and then invoke it via Bash.
 
-> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, and **after getting approval**, invoke it via Bash.
-
-**If the user picks per-step — this session drives the while-loop, not execute.py:**
+**This session drives the loop via `--once` — one step per call, not one call for the whole phase.** (A single whole-phase call cannot stream: Bash returns stdout only when the command exits, so every `✓ Step` line would arrive bunched up at the end instead of one-per-step.)
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once          # run the next pending step only
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once --push    # ... pushes after the final step
+python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once --push    # ... on the FINAL step only, to push after it
 ```
 
 1. Run `execute.py {dir} --once`. It runs exactly one pending step and exits.
 2. Relay the `✓ Step N/M … — {summary}` and `Next ▶ …` lines it printed as a one-line progress report. **Do NOT read `step{N}-output.json`** (the child's full stdout — large and unnecessary); the printed summary is enough.
-3. If a `Next ▶` step remains and no error/blocked occurred, repeat from 1. When it prints `All steps completed!`, stop.
-
-**If the user picks one-shot:**
-
-```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name}        # run the whole phase
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --push  # run, then push
-```
+3. If a `Next ▶` step remains and no error/blocked occurred, **repeat from 1 immediately without asking the user**. Keep going until it prints `All steps completed!`, then stop. (Add `--push` only on the final step's call.)
 
 > **⚠ Safety.** For each step, execute.py spins up a child claude session with permission checks disabled (`--dangerously-skip-permissions`) and automatically branches/commits (and pushes if requested) to the current project's git repo. Always get user approval before running.
 
