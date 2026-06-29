@@ -24,6 +24,15 @@ Also read `/docs/` (ARCHITECTURE, ADR, etc.) and `CLAUDE.md` to confirm the arch
 
 Draft a breakdown into multiple steps and request feedback.
 
+**Climb the structure ladder before drafting** (adapted from ponytail, MIT). Decomposition fixes the structural upper bound on the resulting code: every speculative module/class the plan names, each isolated execution session then dutifully builds (work rule 2 makes it build exactly what is specified — no more, no less). So at each rung, stop if it holds — the plan should introduce only the structure that must exist:
+
+1. **Need to exist at all?** A speculative step/module/seam → drop it, note it in one line. (YAGNI)
+2. **Already in the codebase or an earlier step?** Reuse it; do not re-spec it.
+3. **Stdlib / native feature / installed dependency covers it?** Specify *that*, not a new wrapper or abstraction.
+4. **Could a function replace a class/hierarchy?** Prefer the function; introduce the class only when real state or polymorphism demands it.
+
+Lazy about *structure*, never about the *contract*: still specify each step's interface and its non-negotiable rules (validation, security, idempotency, data integrity — see principle 4) in full. Under-specifying a contract makes independent sessions diverge, which costs more than the structure you saved; and a genuine second module still earns its own step (principle 1). The ladder removes *invented* seams, not real ones.
+
 Design principles:
 
 1. **Minimize scope** — each step touches only one layer or module. If multiple modules must change at once, split the step.
