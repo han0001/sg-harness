@@ -19,30 +19,31 @@ The result is a repeatable pipeline instead of one long, drifting conversation.
 
 ## The workflow at a glance
 
-sg-harness is a **plugin that ships three skills** plus one orchestrator script. You drive it phase by phase:
+sg-harness is a **plugin that ships four skills**, one of which bundles an orchestrator script. You drive it stage by stage:
 
 ```mermaid
 flowchart LR
-    A["/sg-plan<br/>design · grill-me"] -->|plan.md| B["/sg-phase<br/>decompose"]
-    B -->|"step0.md … stepN.md"| C{{"execute.py<br/>orchestrator"}}
+    A["/sg-plan<br/>design · grill-me"] -->|plan.md| B["/sg-decompose-task<br/>decompose"]
+    B -->|"step0.md … stepN.md"| C{{"/sg-execute-task<br/>execute.py orchestrator"}}
     C -->|"isolated claude session<br/>per step (sequential)"| C
     C -->|"commits to feat-task branch"| D["/sg-source-of-truth<br/>knowledge sync"]
     D -->|"update docs/*, CLAUDE.md"| E(("done"))
 ```
 
-| Phase | Skill | Input | Output |
+| Stage | Skill | Input | Output |
 |-------|-------|-------|--------|
 | **1. Design** | `/sg-plan` | your intent + `docs/`, `CLAUDE.md` | `plan/{yyyymmdd}_{task}/plan.md` |
-| **2. Decompose + Execute** | `/sg-phase` | `plan.md` | `phases/{yyyymmdd}_{task}/step*.md` → runs them via `execute.py` |
-| **3. Knowledge sync** | `/sg-source-of-truth` | `plan.md` + the git diff | reconciled `docs/*`, `CLAUDE.md` |
+| **2. Decompose** | `/sg-decompose-task` | `plan.md` | `tasks/{yyyymmdd}_{task}/step*.md` |
+| **3. Execute** | `/sg-execute-task` | the `tasks/` step files | isolated `claude` session per step via `execute.py` → commits |
+| **4. Knowledge sync** | `/sg-source-of-truth` | `plan.md` + the git diff | reconciled `docs/*`, `CLAUDE.md` |
 
-Each phase is independent — you can stop after design, review, and only then move on.
+Each stage is independent — you can stop after design, review, and only then move on.
 
 ---
 
 ## How execution works
 
-The interesting part lives in `skills/sg-phase/scripts/execute.py`, the orchestrator that turns a folder of `step*.md` files into commits. For every pending step it:
+The interesting part lives in `skills/sg-execute-task/scripts/execute.py`, the orchestrator that turns a folder of `step*.md` files into commits. For every pending step it:
 
 - **Spins up an isolated `claude -p` session** — one fresh session per step, so no cross-step context bleed.
 - **Injects the guardrails** — the target project's `CLAUDE.md` and `docs/*.md` are prepended to every step prompt, so each session obeys the same rules.
@@ -73,19 +74,21 @@ The `skills/` and `hooks/` directories are auto-discovered from the plugin root 
 
 ## Quick start
 
-Run the phases in order from inside a **git repository** (the harness refuses to run otherwise):
+Run the stages in order from inside a **git repository** (the harness refuses to run otherwise):
 
 ```text
 /sg-plan             # interview + write plan/{date}_{task}/plan.md — no code yet
-/sg-phase            # split plan.md into steps, then (after your approval) execute them
+/sg-decompose-task   # split plan.md into steps under tasks/{date}_{task}/
+/sg-execute-task     # after your approval, execute those steps one by one
 /sg-source-of-truth  # fold the decisions back into docs/ and CLAUDE.md
 ```
 
 A typical run:
 
 1. **`/sg-plan`** grills you one decision at a time and writes a `plan.md`. It never implements.
-2. **`/sg-phase`** drafts a step breakdown for your review, creates the `step*.md` files, then — after a **single safety approval** — runs `execute.py` step by step, committing as it goes.
-3. **`/sg-source-of-truth`** harvests what actually changed (plan + git diff) and proposes doc edits for you to approve.
+2. **`/sg-decompose-task`** drafts a step breakdown for your review and creates the `step*.md` files. It does not run anything.
+3. **`/sg-execute-task`** — after a **single safety approval** — runs `execute.py` step by step, committing as it goes.
+4. **`/sg-source-of-truth`** harvests what actually changed (plan + git diff) and proposes doc edits for you to approve.
 
 ---
 
@@ -94,13 +97,14 @@ A typical run:
 ```text
 sg-harness/
 ├── skills/
-│   ├── sg-plan/SKILL.md               # design phase (grill-me → plan.md)
-│   ├── sg-phase/
-│   │   ├── SKILL.md                   # decompose + execute phase
+│   ├── sg-plan/SKILL.md               # design stage (grill-me → plan.md)
+│   ├── sg-decompose-task/SKILL.md     # decompose stage (plan.md → tasks/step*.md)
+│   ├── sg-execute-task/
+│   │   ├── SKILL.md                   # execute stage
 │   │   └── scripts/
 │   │       ├── execute.py             # the orchestrator (isolated session per step)
 │   │       └── test_execute.py        # its tests
-│   └── sg-source-of-truth/SKILL.md    # knowledge-sync phase
+│   └── sg-source-of-truth/SKILL.md    # knowledge-sync stage
 ├── hooks/hooks.json                   # PreToolUse Bash safety guard
 ├── .claude-plugin/
 │   ├── plugin.json                    # plugin manifest
@@ -129,7 +133,7 @@ Running code-writing sessions automatically is powerful, so the harness layers o
 - Target is the **git root of cwd**, not the plugin's install path.
 - **Only `execute.py` touches git.**
 - **Step files are self-contained** — no references to an earlier conversation.
-- Naming: top index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task `phase` = `{task}` (date excluded).
+- Naming: top index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded).
 - **Refuses to run outside a git repo.**
 
 **Non-goals** (deliberately out of scope):
@@ -145,7 +149,7 @@ Running code-writing sessions automatically is powerful, so the harness layers o
 Run the orchestrator's test suite:
 
 ```bash
-.venv/bin/python -m pytest skills/sg-phase/scripts/test_execute.py -q
+.venv/bin/python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
 ```
 
 See [`CLAUDE.md`](./CLAUDE.md) for the full development guide (purpose, invariants, and working discipline for hacking on the harness itself).

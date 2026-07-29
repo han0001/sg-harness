@@ -1,17 +1,19 @@
 ---
-name: sg-phase
-description: Decomposition and execution phase of the sg-* workflow. Splits a plan.md plan into executable steps and drives an isolated claude session per step sequentially via the bundled execute.py. Use when moving a design into code, or when you need "task breakdown" / "split into steps and run".
+name: sg-decompose-task
+description: Decomposition stage of the sg-* workflow. Splits a plan.md plan into self-contained, executable steps and writes the task/step files that sg-execute-task later runs. Use when moving a design into an execution plan, or when you need "task breakdown" / "split into steps".
 ---
 
-This skill is the **decomposition and execution phase** of the sg-* workflow. It takes the plan (plan.md) produced by `/sg-plan` as input, splits it into executable steps, and uses `execute.py` to drive an isolated claude session per step sequentially.
+This skill is the **decomposition stage** of the sg-* workflow. It takes the plan (`plan.md`) produced by `/sg-plan` as input, splits it into executable **steps**, and writes the task/step files under `tasks/`. It does **not** run anything — execution is the next stage (`/sg-execute-task`).
 
-(Exploration, discussion, and design are handled by `/sg-plan`. This skill focuses on moving the design result into code.)
+> **Vocabulary** (see `CLAUDE.md` › Vocabulary for the canonical definitions): a **stage** is one skill; a **phase** is an ordered step inside this skill (A, B, C below); a **task** is one goal = one `plan.md`; a **step** is one decomposed, isolated unit of work that `sg-execute-task` runs.
+
+(Exploration, discussion, and design are handled by `/sg-plan`. Running the steps is handled by `/sg-execute-task`.)
 
 ---
 
 ## Workflow
 
-### A. Input: read the plan
+### Phase A — Input: read the plan
 
 Read `plan/{yyyymmdd}_{task-name}/plan.md` to understand the design intent and decisions.
 
@@ -20,7 +22,7 @@ Read `plan/{yyyymmdd}_{task-name}/plan.md` to understand the design intent and d
 
 Also read `/docs/` (ARCHITECTURE, ADR, etc.) and `CLAUDE.md` to confirm the architecture, tech stack, and CRITICAL rules.
 
-### B. Step design
+### Phase B — Step design
 
 Draft a breakdown into multiple steps and request feedback.
 
@@ -43,21 +45,21 @@ Design principles:
 6. **Be specific in cautions** — instead of "be careful", write in the form "Do not do X. Reason: Y".
 7. **Naming** — the step name is a kebab-case slug capturing the step's core module/task in one or two words (e.g. `project-setup`, `api-layer`).
 
-### C. Create files
+### Phase C — Create files
 
 Once the user approves, create the following files in the user's project (cwd).
 
 > **⚠ Naming contract (directly tied to Fail-Fast).** The two names point to different levels, so distinguish them precisely:
 > - top index `dir` = **the folder name verbatim** = `{yyyymmdd}_{task-name}` (date **included**). execute.py matches the top index by this value; a mismatch desyncs the status and raises a `WARN`.
-> - per-task index `phase` = **task name only** = `{task-name}` (date **excluded**). execute.py creates the `feat-{task-name}` branch from this value.
+> - per-task index `task` = **task name only** = `{task-name}` (date **excluded**). execute.py creates the `feat-{task-name}` branch from this value.
 
-#### C-1. `phases/index.json` (overall status)
+#### C-1. `tasks/index.json` (overall status)
 
-A top-level index that manages multiple tasks. If it already exists, append a new entry to the `phases` array.
+A top-level index that manages multiple tasks. If it already exists, append a new entry to the `tasks` array.
 
 ```json
 {
-  "phases": [
+  "tasks": [
     { "dir": "{yyyymmdd}_{task-name}", "status": "pending" }
   ]
 }
@@ -67,12 +69,12 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 - `status`: `"pending"` | `"completed"` | `"error"` | `"blocked"`. execute.py updates it automatically.
 - Timestamps are recorded automatically by execute.py. Do not add them at creation time.
 
-#### C-2. `phases/{yyyymmdd}_{task-name}/index.json` (task detail)
+#### C-2. `tasks/{yyyymmdd}_{task-name}/index.json` (task detail)
 
 ```json
 {
   "project": "<project-name>",
-  "phase": "{task-name}",
+  "task": "{task-name}",
   "steps": [
     { "step": 0, "name": "project-setup", "status": "pending" },
     { "step": 1, "name": "core-types", "status": "pending" }
@@ -81,7 +83,7 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 ```
 
 - `project`: the project name (see CLAUDE.md).
-- `phase`: **task name only** (date excluded). It is the basis for the branch name `feat-{task-name}`.
+- `task`: **task name only** (date excluded). It is the basis for the branch name `feat-{task-name}`.
 - `steps[].step`: a 0-based sequence number.
 - `steps[].name`: a kebab-case slug.
 - `steps[].status`: all initialized to `"pending"`.
@@ -96,7 +98,7 @@ Fields recorded automatically on state transitions:
 
 `summary` is a one-line summary of the step's output written on completion; execute.py accumulates it as context into subsequent step prompts. `created_at` and `started_at` are recorded automatically by execute.py.
 
-#### C-3. `phases/{yyyymmdd}_{task-name}/step{N}.md` (one per step)
+#### C-3. `tasks/{yyyymmdd}_{task-name}/step{N}.md` (one per step)
 
 ```markdown
 # Step {N}: {name}
@@ -130,7 +132,7 @@ npm test        # tests pass
    - Does it follow the ARCHITECTURE.md directory structure?
    - Does it stay within the ADR tech stack?
    - Does it violate any CLAUDE.md CRITICAL rule?
-3. Based on the result, update the corresponding step in `phases/{yyyymmdd}_{task-name}/index.json`:
+3. Based on the result, update the corresponding step in `tasks/{yyyymmdd}_{task-name}/index.json`:
    - success → `"status": "completed"`, `"summary": "one-line summary of the output"`
    - still failing after 3 fix attempts → `"status": "error"`, `"error_message": "concrete error detail"`
    - user intervention needed → `"status": "blocked"`, `"blocked_reason": "concrete reason"`, then stop immediately
@@ -141,42 +143,6 @@ npm test        # tests pass
 - Do not break existing tests
 ```
 
-### D. Execute
+### Next stage
 
-Once the step files are created and approved, run the executor. **There is one reporting mode and you do not ask the user to choose it.** This session drives the run **automatically from the first pending step to the last** — it never pauses mid-run to ask "run the next step?". After each step finishes it emits a **one-line progress report** into this chat (`✓ Step N/M … — {summary}` + `Next ▶ …`), so the user watches progress live without lifting a finger. The run only stops on **error** or **blocked** (see Error recovery below).
-
-> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, get the **one** safety approval (it disables permission checks and auto-commits — see Safety below), and then invoke it via Bash.
-
-**This session drives the loop via `--once` — one step per call, not one call for the whole phase.** (A single whole-phase call cannot stream: Bash returns stdout only when the command exits, so every `✓ Step` line would arrive bunched up at the end instead of one-per-step.)
-
-```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once          # run the next pending step only
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once --push    # ... on the FINAL step only, to push after it
-```
-
-1. Run `execute.py {dir} --once`. It runs exactly one pending step and exits.
-2. Relay the `✓ Step N/M … — {summary}` and `Next ▶ …` lines it printed as a one-line progress report. **Do NOT read `step{N}-output.json`** (the child's full stdout — large and unnecessary); the printed summary is enough.
-3. If a `Next ▶` step remains and no error/blocked occurred, **repeat from 1 immediately without asking the user**. Keep going until it prints `All steps completed!`, then stop. (Add `--push` only on the final step's call.)
-
-> **⚠ Safety.** For each step, execute.py spins up a child claude session with permission checks disabled (`--dangerously-skip-permissions`) and automatically branches/commits (and pushes if requested) to the current project's git repo. Always get user approval before running.
-
-**Target = the current project (cwd).** execute.py treats the **git root of cwd** — not its own install location — as the project root, reading `phases/`, `CLAUDE.md`, and `docs/` and committing to that repo. So this session must be running at the user's project root, and the step files created in C must live there too.
-
-What execute.py handles automatically:
-
-- Creates/checks out the `feat-{task-name}` branch
-- Injects guardrails — includes CLAUDE.md + docs/*.md in every step prompt
-- Accumulates context — passes completed steps' summaries into the next step prompt
-- Self-correction — retries up to 3 times on failure, feeding the previous error back into the prompt
-- Two-stage commit — commits code changes (`feat`) and metadata (`chore`) separately
-- Records timestamps automatically
-- **Fail-Fast** — if the `dir` entry is missing from the top index, reports the desync via `WARN`
-
-Error recovery:
-
-- **On error**: set the step's `status` back to `"pending"` in index.json, delete `error_message`, then re-run.
-- **On blocked**: resolve the `blocked_reason`, set `status` back to `"pending"`, delete `blocked_reason`, then re-run.
-
-### Next step
-
-When the work is done and you are wrapping up the session, use `/sg-source-of-truth` to sync this task's decisions and changes back into the permanent docs (docs/*, CLAUDE.md).
+Once the step files are created and approved, move on to `/sg-execute-task` to run them.

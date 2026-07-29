@@ -24,9 +24,9 @@ import execute as ex
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """A temporary project structure with phases/, CLAUDE.md, and docs/."""
-    phases_dir = tmp_path / "phases"
-    phases_dir.mkdir()
+    """A temporary project structure with tasks/, CLAUDE.md, and docs/."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
 
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text("# Rules\n- rule one\n- rule two")
@@ -40,14 +40,14 @@ def tmp_project(tmp_path):
 
 
 @pytest.fixture
-def phase_dir(tmp_project):
-    """A phase directory with 3 steps."""
-    d = tmp_project / "phases" / "0-mvp"
+def task_dir(tmp_project):
+    """A task directory with 3 steps."""
+    d = tmp_project / "tasks" / "0-mvp"
     d.mkdir()
 
     index = {
         "project": "TestProject",
-        "phase": "mvp",
+        "task": "mvp",
         "steps": [
             {"step": 0, "name": "setup", "status": "completed", "summary": "project initialized"},
             {"step": 1, "name": "core", "status": "completed", "summary": "core logic implemented"},
@@ -62,30 +62,30 @@ def phase_dir(tmp_project):
 
 @pytest.fixture
 def top_index(tmp_project):
-    """phases/index.json (top-level)."""
+    """tasks/index.json (top-level)."""
     top = {
-        "phases": [
+        "tasks": [
             {"dir": "0-mvp", "status": "pending"},
             {"dir": "1-polish", "status": "pending"},
         ]
     }
-    p = tmp_project / "phases" / "index.json"
+    p = tmp_project / "tasks" / "index.json"
     p.write_text(json.dumps(top, indent=2))
     return p
 
 
 @pytest.fixture
-def executor(tmp_project, phase_dir):
+def executor(tmp_project, task_dir):
     """A StepExecutor instance for tests. git calls must be mocked separately."""
     with patch.object(ex, "ROOT", tmp_project):
         inst = ex.StepExecutor("0-mvp")
     # Reset internal paths relative to tmp_project
     inst._root = str(tmp_project)
-    inst._phases_dir = tmp_project / "phases"
-    inst._phase_dir = phase_dir
-    inst._phase_dir_name = "0-mvp"
-    inst._index_file = phase_dir / "index.json"
-    inst._top_index_file = tmp_project / "phases" / "index.json"
+    inst._tasks_dir = tmp_project / "tasks"
+    inst._task_dir = task_dir
+    inst._task_dir_name = "0-mvp"
+    inst._index_file = task_dir / "index.json"
+    inst._top_index_file = tmp_project / "tasks" / "index.json"
     return inst
 
 
@@ -184,10 +184,10 @@ class TestLoadGuardrails:
     def test_empty_project(self, tmp_path):
         with patch.object(ex, "ROOT", tmp_path):
             # Static-like behavior that needs no executor, so use a throwaway instance
-            phases_dir = tmp_path / "phases" / "dummy"
-            phases_dir.mkdir(parents=True)
-            idx = {"project": "T", "phase": "t", "steps": []}
-            (phases_dir / "index.json").write_text(json.dumps(idx))
+            tasks_dir = tmp_path / "tasks" / "dummy"
+            tasks_dir.mkdir(parents=True)
+            idx = {"project": "T", "task": "t", "steps": []}
+            (tasks_dir / "index.json").write_text(json.dumps(idx))
             inst = ex.StepExecutor.__new__(ex.StepExecutor)
             result = inst._load_guardrails()
         assert result == ""
@@ -198,19 +198,19 @@ class TestLoadGuardrails:
 # ---------------------------------------------------------------------------
 
 class TestBuildStepContext:
-    def test_includes_completed_with_summary(self, phase_dir):
-        index = json.loads((phase_dir / "index.json").read_text())
+    def test_includes_completed_with_summary(self, task_dir):
+        index = json.loads((task_dir / "index.json").read_text())
         result = ex.StepExecutor._build_step_context(index)
         assert "Step 0 (setup): project initialized" in result
         assert "Step 1 (core): core logic implemented" in result
 
-    def test_excludes_pending(self, phase_dir):
-        index = json.loads((phase_dir / "index.json").read_text())
+    def test_excludes_pending(self, task_dir):
+        index = json.loads((task_dir / "index.json").read_text())
         result = ex.StepExecutor._build_step_context(index)
         assert "ui" not in result
 
-    def test_excludes_completed_without_summary(self, phase_dir):
-        index = json.loads((phase_dir / "index.json").read_text())
+    def test_excludes_completed_without_summary(self, task_dir):
+        index = json.loads((task_dir / "index.json").read_text())
         del index["steps"][0]["summary"]
         result = ex.StepExecutor._build_step_context(index)
         assert "setup" not in result
@@ -221,8 +221,8 @@ class TestBuildStepContext:
         result = ex.StepExecutor._build_step_context(index)
         assert result == ""
 
-    def test_has_header(self, phase_dir):
-        index = json.loads((phase_dir / "index.json").read_text())
+    def test_has_header(self, task_dir):
+        index = json.loads((task_dir / "index.json").read_text())
         result = ex.StepExecutor._build_step_context(index)
         assert result.startswith("## Previous step outputs")
 
@@ -272,7 +272,7 @@ class TestBuildPreamble:
 
     def test_includes_index_path(self, executor):
         result = executor._build_preamble("", "")
-        assert "/phases/0-mvp/index.json" in result
+        assert "/tasks/0-mvp/index.json" in result
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ class TestUpdateTopIndex:
         executor._top_index_file = top_index
         executor._update_top_index("completed")
         data = json.loads(top_index.read_text())
-        mvp = next(p for p in data["phases"] if p["dir"] == "0-mvp")
+        mvp = next(t for t in data["tasks"] if t["dir"] == "0-mvp")
         assert mvp["status"] == "completed"
         assert "completed_at" in mvp
 
@@ -292,7 +292,7 @@ class TestUpdateTopIndex:
         executor._top_index_file = top_index
         executor._update_top_index("error")
         data = json.loads(top_index.read_text())
-        mvp = next(p for p in data["phases"] if p["dir"] == "0-mvp")
+        mvp = next(t for t in data["tasks"] if t["dir"] == "0-mvp")
         assert mvp["status"] == "error"
         assert "failed_at" in mvp
 
@@ -300,26 +300,26 @@ class TestUpdateTopIndex:
         executor._top_index_file = top_index
         executor._update_top_index("blocked")
         data = json.loads(top_index.read_text())
-        mvp = next(p for p in data["phases"] if p["dir"] == "0-mvp")
+        mvp = next(t for t in data["tasks"] if t["dir"] == "0-mvp")
         assert mvp["status"] == "blocked"
         assert "blocked_at" in mvp
 
-    def test_other_phases_unchanged(self, executor, top_index):
+    def test_other_tasks_unchanged(self, executor, top_index):
         executor._top_index_file = top_index
         executor._update_top_index("completed")
         data = json.loads(top_index.read_text())
-        polish = next(p for p in data["phases"] if p["dir"] == "1-polish")
+        polish = next(t for t in data["tasks"] if t["dir"] == "1-polish")
         assert polish["status"] == "pending"
 
     def test_nonexistent_dir_warns(self, executor, top_index, capsys):
         executor._top_index_file = top_index
-        executor._phase_dir_name = "no-such-dir"
+        executor._task_dir_name = "no-such-dir"
         original = json.loads(top_index.read_text())
         executor._update_top_index("completed")
         after = json.loads(top_index.read_text())
         # No invalid status is recorded, so the file is unchanged
-        for p_before, p_after in zip(original["phases"], after["phases"]):
-            assert p_before["status"] == p_after["status"]
+        for t_before, t_after in zip(original["tasks"], after["tasks"]):
+            assert t_before["status"] == t_after["status"]
         # Fail-Fast: warn about the desync instead of staying silent
         out = capsys.readouterr().out
         assert "WARN" in out
@@ -391,7 +391,7 @@ class TestCheckoutBranch:
 # ---------------------------------------------------------------------------
 
 class TestCommitStep:
-    def test_two_phase_commit(self, executor):
+    def test_two_stage_commit(self, executor):
         calls = []
         def fake_git(*args):
             calls.append(args)
@@ -455,7 +455,7 @@ class TestInvokeClaude:
         with patch("subprocess.run", return_value=mock_result):
             executor._invoke_claude(step, "preamble")
 
-        output_file = executor._phase_dir / "step2-output.json"
+        output_file = executor._task_dir / "step2-output.json"
         assert output_file.exists()
         data = json.loads(output_file.read_text())
         assert data["step"] == 2
@@ -507,7 +507,7 @@ class TestMainCli:
                 ex.main()
             assert exc_info.value.code == 2  # argparse exits with 2
 
-    def test_invalid_phase_dir_exits(self):
+    def test_invalid_task_dir_exits(self):
         with patch("sys.argv", ["execute.py", "nonexistent"]):
             with patch.object(ex, "ROOT", Path("/tmp/fake_nonexistent")):
                 with pytest.raises(SystemExit) as exc_info:
@@ -515,7 +515,7 @@ class TestMainCli:
                 assert exc_info.value.code == 1
 
     def test_missing_index_exits(self, tmp_project):
-        (tmp_project / "phases" / "empty").mkdir()
+        (tmp_project / "tasks" / "empty").mkdir()
         with patch("sys.argv", ["execute.py", "empty"]):
             with patch.object(ex, "ROOT", tmp_project):
                 with pytest.raises(SystemExit) as exc_info:
@@ -529,20 +529,20 @@ class TestMainCli:
 
 class TestCheckBlockers:
     def _make_executor_with_steps(self, tmp_project, steps):
-        d = tmp_project / "phases" / "test-phase"
+        d = tmp_project / "tasks" / "test-task"
         d.mkdir(exist_ok=True)
-        index = {"project": "T", "phase": "test", "steps": steps}
+        index = {"project": "T", "task": "test", "steps": steps}
         (d / "index.json").write_text(json.dumps(index))
 
         with patch.object(ex, "ROOT", tmp_project):
             inst = ex.StepExecutor.__new__(ex.StepExecutor)
         inst._root = str(tmp_project)
-        inst._phases_dir = tmp_project / "phases"
-        inst._phase_dir = d
-        inst._phase_dir_name = "test-phase"
+        inst._tasks_dir = tmp_project / "tasks"
+        inst._task_dir = d
+        inst._task_dir_name = "test-task"
         inst._index_file = d / "index.json"
-        inst._top_index_file = tmp_project / "phases" / "index.json"
-        inst._phase_name = "test"
+        inst._top_index_file = tmp_project / "tasks" / "index.json"
+        inst._task_name = "test"
         inst._total = len(steps)
         return inst
 
