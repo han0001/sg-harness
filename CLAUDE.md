@@ -7,11 +7,30 @@
 
 A Claude Code workflow harness that splits a large task into isolated steps and runs them sequentially with self-correction (design → decompose → execute → knowledge-sync).
 
+## Vocabulary (canonical — use these exact words everywhere, in code and docs)
+
+The workflow nests along **two axes**. Learn them as two pairs:
+
+| Term | Meaning | Example |
+|------|---------|---------|
+| **workflow** | the whole sg-* chain | sg-plan → sg-decompose-task → sg-execute-task → sg-source-of-truth |
+| **stage** | one skill in the chain | `sg-plan` · `sg-decompose-task` · `sg-execute-task` · `sg-source-of-truth` |
+| **phase** | an ordered step *inside* one skill | sg-decompose-task's A. read plan → B. step design → C. create files |
+| **task** | one goal = one `plan.md` = one `tasks/{yyyymmdd}_{name}/` dir | "auction map viewer MVP" |
+| **step** | one decomposed, isolated unit of work under a task (tracked in `index.json`) | step0 setup · step1 map … |
+
+- **Procedure axis:** `stage → phase` (which skill / which part of that skill).
+- **Work axis:** `task → step` (which goal / which slice of that goal).
+- **Disambiguator:** if the harness tracks it with `status` + timestamps, it's a **step**; if it's fixed prose in a `SKILL.md`, it's a **phase**.
+
+> Historical note: `phase` used to mean "task" in the code (the `phases/` dir, `phase_dir`, the `feat-{phase}` branch). That usage is **retired** — the on-disk dir is now `tasks/`, the index field is `task`, and `phase` now means only "an ordered step inside a skill".
+
 ## Layout (flat — `skills/` and `hooks/` live at the repo root)
 
-- `skills/sg-plan/` — **design** phase: runs grill-me, writes `plan/{yyyymmdd}_{task}/plan.md`. Does not implement.
-- `skills/sg-phase/` — **decompose + execute** phase: splits `plan.md` into steps and runs one isolated claude session per step via `scripts/execute.py` (the orchestrator). Tests live in `scripts/test_execute.py`.
-- `skills/sg-source-of-truth/` — **knowledge-sync** phase: harvests decisions from `plan.md` + the git diff into the permanent docs (e.g. this file).
+- `skills/sg-plan/` — **design** stage: runs grill-me, writes `plan/{yyyymmdd}_{task}/plan.md`. Does not implement.
+- `skills/sg-decompose-task/` — **decompose** stage: splits `plan.md` into steps and writes the `tasks/{yyyymmdd}_{task}/` files (index.json + step files). Does not run anything.
+- `skills/sg-execute-task/` — **execute** stage: runs one isolated claude session per step via `scripts/execute.py` (the orchestrator). Tests live in `scripts/test_execute.py`.
+- `skills/sg-source-of-truth/` — **knowledge-sync** stage: harvests decisions from `plan.md` + the git diff into the permanent docs (e.g. this file).
 - `hooks/hooks.json` — PreToolUse Bash guard that blocks `rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`.
 - `.claude-plugin/plugin.json` + `marketplace.json` — plugin manifest and single-plugin marketplace (`source: "."`); `skills/` and `hooks/` are auto-discovered from the plugin root. Install: `/plugin marketplace add han0001/sg-harness`.
 
@@ -27,7 +46,7 @@ A Claude Code workflow harness that splits a large task into isolated steps and 
 1. **Target = the git root of cwd**, never the script's own install location.
 2. **Only the orchestrator (`execute.py`) touches git.** Child Claude sessions must NOT be instructed to commit or push — the preamble explicitly forbids it.
 3. **Step files are self-contained** — no references to external/earlier conversation.
-4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task `phase` = `{task}` (date excluded).
+4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded, basis for the `feat-{task}` branch).
 5. **Refuse to run if not a git repo.**
 
 ## Working discipline (how we work in this repo)
@@ -40,5 +59,5 @@ A Claude Code workflow harness that splits a large task into isolated steps and 
 ## Dev commands
 
 ```bash
-.venv/bin/python -m pytest skills/sg-phase/scripts/test_execute.py -q
+.venv/bin/python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
 ```

@@ -1,11 +1,11 @@
 ---
 name: sg-source-of-truth
-description: Knowledge-sync phase of the sg-* workflow. Harvests the decisions and architecture changes made during a task from plan.md and the git diff, and syncs them into the permanent docs (docs/*, CLAUDE.md). Use when wrapping up a task/session, or when the docs have drifted from the code.
+description: Knowledge-sync stage of the sg-* workflow. Harvests the decisions and architecture changes made during a task from plan.md and the git diff, and syncs them into the permanent docs (docs/*, CLAUDE.md). Use when wrapping up a task/session, or when the docs have drifted from the code.
 ---
 
-This skill is the **knowledge-sync phase** of the sg-* workflow. It harvests the decisions made during a task — and the architecture/design changes they caused — from scattered, volatile outputs and syncs them into the **permanent docs** (`docs/*`, `CLAUDE.md`).
+This skill is the **knowledge-sync stage** of the sg-* workflow. It harvests the decisions made during a task — and the architecture/design changes they caused — from scattered, volatile outputs and syncs them into the **permanent docs** (`docs/*`, `CLAUDE.md`).
 
-Without this phase, knowledge gets trapped in the old `plan/` folder and the permanent docs drift from reality and rot.
+Without this stage, knowledge gets trapped in the old `plan/` folder and the permanent docs drift from reality and rot.
 
 ---
 

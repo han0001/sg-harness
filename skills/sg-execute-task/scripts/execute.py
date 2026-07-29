@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Harness Step Executor — runs the steps within a phase sequentially and self-corrects.
+Harness Step Executor — runs the steps within a task sequentially and self-corrects.
 
 Usage (run from the user's project root):
-    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/execute.py" <phase-dir> [--push]
+    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/execute.py" <task-dir> [--push]
 
 ROOT (the target of the work) is the git root of cwd, independent of the script's own location.
 """
@@ -72,33 +72,33 @@ def progress_indicator(label: str):
 
 
 class StepExecutor:
-    """Harness that runs the steps inside a phase directory sequentially."""
+    """Harness that runs the steps inside a task directory sequentially."""
 
     MAX_RETRIES = 3
-    FEAT_MSG = "feat({phase}): step {num} — {name}"
-    CHORE_MSG = "chore({phase}): step {num} output"
+    FEAT_MSG = "feat({task}): step {num} — {name}"
+    CHORE_MSG = "chore({task}): step {num} output"
     TZ = timezone(timedelta(hours=9))
 
-    def __init__(self, phase_dir_name: str, *, auto_push: bool = False):
+    def __init__(self, task_dir_name: str, *, auto_push: bool = False):
         self._root = str(ROOT)
-        self._phases_dir = ROOT / "phases"
-        self._phase_dir = self._phases_dir / phase_dir_name
-        self._phase_dir_name = phase_dir_name
-        self._top_index_file = self._phases_dir / "index.json"
+        self._tasks_dir = ROOT / "tasks"
+        self._task_dir = self._tasks_dir / task_dir_name
+        self._task_dir_name = task_dir_name
+        self._top_index_file = self._tasks_dir / "index.json"
         self._auto_push = auto_push
 
-        if not self._phase_dir.is_dir():
-            print(f"ERROR: {self._phase_dir} not found")
+        if not self._task_dir.is_dir():
+            print(f"ERROR: {self._task_dir} not found")
             sys.exit(1)
 
-        self._index_file = self._phase_dir / "index.json"
+        self._index_file = self._task_dir / "index.json"
         if not self._index_file.exists():
             print(f"ERROR: {self._index_file} not found")
             sys.exit(1)
 
         idx = self._read_json(self._index_file)
         self._project = idx.get("project", "project")
-        self._phase_name = idx.get("phase", phase_dir_name)
+        self._task_name = idx.get("task", task_dir_name)
         self._total = len(idx["steps"])
 
     def run(self, once: bool = False):
@@ -133,7 +133,7 @@ class StepExecutor:
         return subprocess.run(cmd, cwd=self._root, capture_output=True, text=True)
 
     def _checkout_branch(self):
-        branch = f"feat-{self._phase_name}"
+        branch = f"feat-{self._task_name}"
 
         r = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         if r.returncode != 0:
@@ -156,15 +156,15 @@ class StepExecutor:
         print(f"  Branch: {branch}")
 
     def _commit_step(self, step_num: int, step_name: str):
-        output_rel = f"phases/{self._phase_dir_name}/step{step_num}-output.json"
-        index_rel = f"phases/{self._phase_dir_name}/index.json"
+        output_rel = f"tasks/{self._task_dir_name}/step{step_num}-output.json"
+        index_rel = f"tasks/{self._task_dir_name}/index.json"
 
         self._run_git("add", "-A")
         self._run_git("reset", "HEAD", "--", output_rel)
         self._run_git("reset", "HEAD", "--", index_rel)
 
         if self._run_git("diff", "--cached", "--quiet").returncode != 0:
-            msg = self.FEAT_MSG.format(phase=self._phase_name, num=step_num, name=step_name)
+            msg = self.FEAT_MSG.format(task=self._task_name, num=step_num, name=step_name)
             r = self._run_git("commit", "-m", msg)
             if r.returncode == 0:
                 print(f"  Commit: {msg}")
@@ -173,7 +173,7 @@ class StepExecutor:
 
         self._run_git("add", "-A")
         if self._run_git("diff", "--cached", "--quiet").returncode != 0:
-            msg = self.CHORE_MSG.format(phase=self._phase_name, num=step_num)
+            msg = self.CHORE_MSG.format(task=self._task_name, num=step_num)
             r = self._run_git("commit", "-m", msg)
             if r.returncode != 0:
                 print(f"  WARN: housekeeping commit failed: {r.stderr.strip()}")
@@ -186,18 +186,18 @@ class StepExecutor:
         top = self._read_json(self._top_index_file)
         ts = self._stamp()
         matched = False
-        for phase in top.get("phases", []):
-            if phase.get("dir") == self._phase_dir_name:
-                phase["status"] = status
+        for task in top.get("tasks", []):
+            if task.get("dir") == self._task_dir_name:
+                task["status"] = status
                 ts_key = {"completed": "completed_at", "error": "failed_at", "blocked": "blocked_at"}.get(status)
                 if ts_key:
-                    phase[ts_key] = ts
+                    task[ts_key] = ts
                 matched = True
                 break
         if not matched:
-            # Fail-Fast: if this phase entry is missing from the top index, the status silently desyncs.
+            # Fail-Fast: if this task entry is missing from the top index, the status silently desyncs.
             # Warn explicitly instead of staying silent. (dir must match the folder name exactly.)
-            print(f"  WARN: top index (phases/index.json) has no entry with dir='{self._phase_dir_name}', "
+            print(f"  WARN: top index (tasks/index.json) has no entry with dir='{self._task_dir_name}', "
                   f"so status ('{status}') could not be recorded. Check that dir matches the folder name.")
             return
         self._write_json(self._top_index_file, top)
@@ -243,7 +243,7 @@ class StepExecutor:
             f"2. Do only the work specified in this step. Do not add extra features or files.\n"
             f"3. Do not break existing tests.\n"
             f"4. Run the AC (Acceptance Criteria) verification yourself.\n"
-            f"5. Update the corresponding step status in /phases/{self._phase_dir_name}/index.json:\n"
+            f"5. Update the corresponding step status in /tasks/{self._task_dir_name}/index.json:\n"
             f"   - AC passes → \"completed\" + a one-line summary of this step's output in the \"summary\" field\n"
             f"   - still failing after {self.MAX_RETRIES} fix attempts → record \"error\" + \"error_message\"\n"
             f"   - if user intervention is needed (API key, auth, manual setup, etc.) → record \"blocked\" + \"blocked_reason\", then stop immediately\n"
@@ -255,7 +255,7 @@ class StepExecutor:
 
     def _invoke_claude(self, step: dict, preamble: str) -> dict:
         step_num, step_name = step["step"], step["name"]
-        step_file = self._phase_dir / f"step{step_num}.md"
+        step_file = self._task_dir / f"step{step_num}.md"
 
         if not step_file.exists():
             print(f"  ERROR: {step_file} not found")
@@ -277,7 +277,7 @@ class StepExecutor:
             "exitCode": result.returncode,
             "stdout": result.stdout, "stderr": result.stderr,
         }
-        out_path = self._phase_dir / f"step{step_num}-output.json"
+        out_path = self._task_dir / f"step{step_num}-output.json"
         with open(out_path, "w") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
 
@@ -288,7 +288,7 @@ class StepExecutor:
     def _print_header(self):
         print(f"\n{'='*60}")
         print(f"  Harness Step Executor")
-        print(f"  Phase: {self._phase_name} | Steps: {self._total}")
+        print(f"  Task: {self._task_name} | Steps: {self._total}")
         if self._auto_push:
             print(f"  Auto-push: enabled")
         print(f"{'='*60}")
@@ -393,7 +393,7 @@ class StepExecutor:
         return False  # unreachable
 
     def _execute_all_steps(self, guardrails: str, once: bool = False) -> bool:
-        """Run pending steps. Returns True when no pending steps remain (phase done).
+        """Run pending steps. Returns True when no pending steps remain (task done).
         In once mode, runs a single step and returns whether that was the last one."""
         while True:
             index = self._read_json(self._index_file)
@@ -424,13 +424,13 @@ class StepExecutor:
 
         self._run_git("add", "-A")
         if self._run_git("diff", "--cached", "--quiet").returncode != 0:
-            msg = f"chore({self._phase_name}): mark phase completed"
+            msg = f"chore({self._task_name}): mark task completed"
             r = self._run_git("commit", "-m", msg)
             if r.returncode == 0:
                 print(f"  ✓ {msg}")
 
         if self._auto_push:
-            branch = f"feat-{self._phase_name}"
+            branch = f"feat-{self._task_name}"
             r = self._run_git("push", "-u", "origin", branch)
             if r.returncode != 0:
                 print(f"\n  ERROR: git push failed: {r.stderr.strip()}")
@@ -438,18 +438,18 @@ class StepExecutor:
             print(f"  ✓ Pushed to origin/{branch}")
 
         print(f"\n{'='*60}")
-        print(f"  Phase '{self._phase_name}' completed!")
+        print(f"  Task '{self._task_name}' completed!")
         print(f"{'='*60}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Harness Step Executor")
-    parser.add_argument("phase_dir", help="Phase directory name (e.g. 20260616_task-name)")
+    parser.add_argument("task_dir", help="Task directory name (e.g. 20260616_task-name)")
     parser.add_argument("--push", action="store_true", help="Push branch after completion")
     parser.add_argument("--once", action="store_true", help="Run only the next pending step, then exit")
     args = parser.parse_args()
 
-    StepExecutor(args.phase_dir, auto_push=args.push).run(once=args.once)
+    StepExecutor(args.task_dir, auto_push=args.push).run(once=args.once)
 
 
 if __name__ == "__main__":
