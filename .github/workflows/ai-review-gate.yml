@@ -1,0 +1,48 @@
+name: ai-review-gate
+
+# Phase 1 — review only. Claude reviews each PR and posts a comment with a
+# RISK verdict. It has NO merge authority yet (contents: read); the merge/label
+# gate is added in a later phase once the review step is verified.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write          # claude-code-action exchanges an OIDC token for creds
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}   # so Claude's Bash can run `gh pr comment`
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # full history so we can diff against base
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
+            --max-turns 15
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }}
+            in ${{ github.repository }}. This is REVIEW ONLY — do NOT merge, label,
+            or edit anything.
+
+            1. Read the diff:
+               git diff origin/${{ github.event.pull_request.base.ref }}...HEAD
+            2. Review it for correctness, security, and regressions. Follow the
+               repository's CLAUDE.md, especially the "true != important" gate:
+               report only findings that are both real and material.
+            3. Post exactly ONE PR comment with `gh pr comment`, containing:
+               - findings, most important first (or "No blocking issues found")
+               - a final line:  RISK: LOW | HIGH — <one-line reason>
+               Treat as HIGH if the change touches
+               skills/sg-execute-task/scripts/execute.py, hooks/hooks.json,
+               .github/workflows/*, or .claude-plugin/*, OR adds logic not covered
+               by the test suite, OR you found a likely bug. Otherwise LOW.
