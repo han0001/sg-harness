@@ -81,7 +81,7 @@ class StepExecutor:
 
     def __init__(self, task_dir_name: str, *, auto_push: bool = False):
         self._root = str(ROOT)
-        self._tasks_dir = ROOT / "tasks"
+        self._tasks_dir = ROOT / "docs" / "sg" / "tasks"
         self._task_dir = self._tasks_dir / task_dir_name
         self._task_dir_name = task_dir_name
         self._top_index_file = self._tasks_dir / "index.json"
@@ -156,8 +156,8 @@ class StepExecutor:
         print(f"  Branch: {branch}")
 
     def _commit_step(self, step_num: int, step_name: str):
-        output_rel = f"tasks/{self._task_dir_name}/step{step_num}-output.json"
-        index_rel = f"tasks/{self._task_dir_name}/index.json"
+        output_rel = f"docs/sg/tasks/{self._task_dir_name}/step{step_num}-output.json"
+        index_rel = f"docs/sg/tasks/{self._task_dir_name}/index.json"
 
         self._run_git("add", "-A")
         self._run_git("reset", "HEAD", "--", output_rel)
@@ -197,7 +197,7 @@ class StepExecutor:
         if not matched:
             # Fail-Fast: if this task entry is missing from the top index, the status silently desyncs.
             # Warn explicitly instead of staying silent. (dir must match the folder name exactly.)
-            print(f"  WARN: top index (tasks/index.json) has no entry with dir='{self._task_dir_name}', "
+            print(f"  WARN: top index (docs/sg/tasks/index.json) has no entry with dir='{self._task_dir_name}', "
                   f"so status ('{status}') could not be recorded. Check that dir matches the folder name.")
             return
         self._write_json(self._top_index_file, top)
@@ -243,7 +243,7 @@ class StepExecutor:
             f"2. Do only the work specified in this step. Do not add extra features or files.\n"
             f"3. Do not break existing tests.\n"
             f"4. Run the AC (Acceptance Criteria) verification yourself.\n"
-            f"5. Update the corresponding step status in /tasks/{self._task_dir_name}/index.json:\n"
+            f"5. Update the corresponding step status in /docs/sg/tasks/{self._task_dir_name}/index.json:\n"
             f"   - AC passes → \"completed\" + a one-line summary of this step's output in the \"summary\" field\n"
             f"   - still failing after {self.MAX_RETRIES} fix attempts → record \"error\" + \"error_message\"\n"
             f"   - if user intervention is needed (API key, auth, manual setup, etc.) → record \"blocked\" + \"blocked_reason\", then stop immediately\n"

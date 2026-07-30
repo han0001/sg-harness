@@ -32,9 +32,9 @@ flowchart LR
 
 | Stage | Skill | Input | Output |
 |-------|-------|-------|--------|
-| **1. Design** | `/sg-plan` | your intent + `docs/`, `CLAUDE.md` | `plan/{yyyymmdd}_{task}/plan.md` |
-| **2. Decompose** | `/sg-decompose-task` | `plan.md` | `tasks/{yyyymmdd}_{task}/step*.md` |
-| **3. Execute** | `/sg-execute-task` | the `tasks/` step files | isolated `claude` session per step via `execute.py` → commits |
+| **1. Design** | `/sg-plan` | your intent + `docs/`, `CLAUDE.md` | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` |
+| **2. Decompose** | `/sg-decompose-task` | `plan.md` | `docs/sg/tasks/{yyyymmdd}_{task}/step*.md` |
+| **3. Execute** | `/sg-execute-task` | the `docs/sg/tasks/` step files | isolated `claude` session per step via `execute.py` → commits |
 | **4. Knowledge sync** | `/sg-source-of-truth` | `plan.md` + the git diff | reconciled `docs/*`, `CLAUDE.md` |
 
 Each stage is independent — you can stop after design, review, and only then move on.
@@ -77,8 +77,8 @@ The `skills/` and `hooks/` directories are auto-discovered from the plugin root 
 Run the stages in order from inside a **git repository** (the harness refuses to run otherwise):
 
 ```text
-/sg-plan             # interview + write plan/{date}_{task}/plan.md — no code yet
-/sg-decompose-task   # split plan.md into steps under tasks/{date}_{task}/
+/sg-plan             # interview + write docs/sg/plan/{date}_{task}/plan.md — no code yet
+/sg-decompose-task   # split plan.md into steps under docs/sg/tasks/{date}_{task}/
 /sg-execute-task     # after your approval, execute those steps one by one
 /sg-source-of-truth  # fold the decisions back into docs/ and CLAUDE.md
 ```
@@ -98,7 +98,7 @@ A typical run:
 sg-harness/
 ├── skills/
 │   ├── sg-plan/SKILL.md               # design stage (grill-me → plan.md)
-│   ├── sg-decompose-task/SKILL.md     # decompose stage (plan.md → tasks/step*.md)
+│   ├── sg-decompose-task/SKILL.md     # decompose stage (plan.md → docs/sg/tasks/step*.md)
 │   ├── sg-execute-task/
 │   │   ├── SKILL.md                   # execute stage
 │   │   └── scripts/

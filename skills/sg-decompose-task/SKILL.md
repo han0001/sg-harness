@@ -3,7 +3,7 @@ name: sg-decompose-task
 description: Decomposition stage of the sg-* workflow. Splits a plan.md plan into self-contained, executable steps and writes the task/step files that sg-execute-task later runs. Use when moving a design into an execution plan, or when you need "task breakdown" / "split into steps".
 ---
 
-This skill is the **decomposition stage** of the sg-* workflow. It takes the plan (`plan.md`) produced by `/sg-plan` as input, splits it into executable **steps**, and writes the task/step files under `tasks/`. It does **not** run anything — execution is the next stage (`/sg-execute-task`).
+This skill is the **decomposition stage** of the sg-* workflow. It takes the plan (`plan.md`) produced by `/sg-plan` as input, splits it into executable **steps**, and writes the task/step files under `docs/sg/tasks/`. It does **not** run anything — execution is the next stage (`/sg-execute-task`).
 
 > **Vocabulary** (see `CLAUDE.md` › Vocabulary for the canonical definitions): a **stage** is one skill; a **phase** is an ordered step inside this skill (A, B, C below); a **task** is one goal = one `plan.md`; a **step** is one decomposed, isolated unit of work that `sg-execute-task` runs.
 
@@ -15,7 +15,7 @@ This skill is the **decomposition stage** of the sg-* workflow. It takes the pla
 
 ### Phase A — Input: read the plan
 
-Read `plan/{yyyymmdd}_{task-name}/plan.md` to understand the design intent and decisions.
+Read `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` to understand the design intent and decisions.
 
 - If plan.md **exists**: use its decisions as the basis for decomposition.
 - If plan.md is **missing**: warn that "running `/sg-plan` first is recommended", then, if the user wants to proceed, explore `/docs/` directly and decompose (backward compatibility).
@@ -53,7 +53,7 @@ Once the user approves, create the following files in the user's project (cwd).
 > - top index `dir` = **the folder name verbatim** = `{yyyymmdd}_{task-name}` (date **included**). execute.py matches the top index by this value; a mismatch desyncs the status and raises a `WARN`.
 > - per-task index `task` = **task name only** = `{task-name}` (date **excluded**). execute.py creates the `feat-{task-name}` branch from this value.
 
-#### C-1. `tasks/index.json` (overall status)
+#### C-1. `docs/sg/tasks/index.json` (overall status)
 
 A top-level index that manages multiple tasks. If it already exists, append a new entry to the `tasks` array.
 
@@ -69,7 +69,7 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 - `status`: `"pending"` | `"completed"` | `"error"` | `"blocked"`. execute.py updates it automatically.
 - Timestamps are recorded automatically by execute.py. Do not add them at creation time.
 
-#### C-2. `tasks/{yyyymmdd}_{task-name}/index.json` (task detail)
+#### C-2. `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json` (task detail)
 
 ```json
 {
@@ -98,7 +98,7 @@ Fields recorded automatically on state transitions:
 
 `summary` is a one-line summary of the step's output written on completion; execute.py accumulates it as context into subsequent step prompts. `created_at` and `started_at` are recorded automatically by execute.py.
 
-#### C-3. `tasks/{yyyymmdd}_{task-name}/step{N}.md` (one per step)
+#### C-3. `docs/sg/tasks/{yyyymmdd}_{task-name}/step{N}.md` (one per step)
 
 ```markdown
 # Step {N}: {name}
@@ -132,7 +132,7 @@ npm test        # tests pass
    - Does it follow the ARCHITECTURE.md directory structure?
    - Does it stay within the ADR tech stack?
    - Does it violate any CLAUDE.md CRITICAL rule?
-3. Based on the result, update the corresponding step in `tasks/{yyyymmdd}_{task-name}/index.json`:
+3. Based on the result, update the corresponding step in `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json`:
    - success → `"status": "completed"`, `"summary": "one-line summary of the output"`
    - still failing after 3 fix attempts → `"status": "error"`, `"error_message": "concrete error detail"`
    - user intervention needed → `"status": "blocked"`, `"blocked_reason": "concrete reason"`, then stop immediately
