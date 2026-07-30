@@ -152,6 +152,13 @@ Run the orchestrator's test suite:
 .venv/bin/python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
 ```
 
+### Continuous integration
+
+Two GitHub Actions run on every pull request:
+
+- **`pytest`** (`.github/workflows/test.yml`) — runs the `execute.py` test suite.
+- **`review`** (`.github/workflows/ai-review-gate.yml`) — Claude reviews the diff and posts a single `RISK: LOW | HIGH` verdict comment. Review-only: it has no merge authority.
+
 See [`CLAUDE.md`](./CLAUDE.md) for the full development guide (purpose, invariants, and working discipline for hacking on the harness itself).
 
 ---
