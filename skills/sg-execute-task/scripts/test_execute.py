@@ -24,15 +24,15 @@ import execute as ex
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """A temporary project structure with tasks/, CLAUDE.md, and docs/."""
-    tasks_dir = tmp_path / "tasks"
-    tasks_dir.mkdir()
+    """A temporary project structure with docs/sg/tasks/, CLAUDE.md, and docs/."""
+    tasks_dir = tmp_path / "docs" / "sg" / "tasks"
+    tasks_dir.mkdir(parents=True)
 
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text("# Rules\n- rule one\n- rule two")
 
     docs_dir = tmp_path / "docs"
-    docs_dir.mkdir()
+    docs_dir.mkdir(exist_ok=True)
     (docs_dir / "arch.md").write_text("# Architecture\nSome content")
     (docs_dir / "guide.md").write_text("# Guide\nAnother doc")
 
@@ -42,7 +42,7 @@ def tmp_project(tmp_path):
 @pytest.fixture
 def task_dir(tmp_project):
     """A task directory with 3 steps."""
-    d = tmp_project / "tasks" / "0-mvp"
+    d = tmp_project / "docs" / "sg" / "tasks" / "0-mvp"
     d.mkdir()
 
     index = {
@@ -62,14 +62,14 @@ def task_dir(tmp_project):
 
 @pytest.fixture
 def top_index(tmp_project):
-    """tasks/index.json (top-level)."""
+    """docs/sg/tasks/index.json (top-level)."""
     top = {
         "tasks": [
             {"dir": "0-mvp", "status": "pending"},
             {"dir": "1-polish", "status": "pending"},
         ]
     }
-    p = tmp_project / "tasks" / "index.json"
+    p = tmp_project / "docs" / "sg" / "tasks" / "index.json"
     p.write_text(json.dumps(top, indent=2))
     return p
 
@@ -81,11 +81,11 @@ def executor(tmp_project, task_dir):
         inst = ex.StepExecutor("0-mvp")
     # Reset internal paths relative to tmp_project
     inst._root = str(tmp_project)
-    inst._tasks_dir = tmp_project / "tasks"
+    inst._tasks_dir = tmp_project / "docs" / "sg" / "tasks"
     inst._task_dir = task_dir
     inst._task_dir_name = "0-mvp"
     inst._index_file = task_dir / "index.json"
-    inst._top_index_file = tmp_project / "tasks" / "index.json"
+    inst._top_index_file = tmp_project / "docs" / "sg" / "tasks" / "index.json"
     return inst
 
 
@@ -184,7 +184,7 @@ class TestLoadGuardrails:
     def test_empty_project(self, tmp_path):
         with patch.object(ex, "ROOT", tmp_path):
             # Static-like behavior that needs no executor, so use a throwaway instance
-            tasks_dir = tmp_path / "tasks" / "dummy"
+            tasks_dir = tmp_path / "docs" / "sg" / "tasks" / "dummy"
             tasks_dir.mkdir(parents=True)
             idx = {"project": "T", "task": "t", "steps": []}
             (tasks_dir / "index.json").write_text(json.dumps(idx))
@@ -272,7 +272,7 @@ class TestBuildPreamble:
 
     def test_includes_index_path(self, executor):
         result = executor._build_preamble("", "")
-        assert "/tasks/0-mvp/index.json" in result
+        assert "/docs/sg/tasks/0-mvp/index.json" in result
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +515,7 @@ class TestMainCli:
                 assert exc_info.value.code == 1
 
     def test_missing_index_exits(self, tmp_project):
-        (tmp_project / "tasks" / "empty").mkdir()
+        (tmp_project / "docs" / "sg" / "tasks" / "empty").mkdir()
         with patch("sys.argv", ["execute.py", "empty"]):
             with patch.object(ex, "ROOT", tmp_project):
                 with pytest.raises(SystemExit) as exc_info:
@@ -529,7 +529,7 @@ class TestMainCli:
 
 class TestCheckBlockers:
     def _make_executor_with_steps(self, tmp_project, steps):
-        d = tmp_project / "tasks" / "test-task"
+        d = tmp_project / "docs" / "sg" / "tasks" / "test-task"
         d.mkdir(exist_ok=True)
         index = {"project": "T", "task": "test", "steps": steps}
         (d / "index.json").write_text(json.dumps(index))
@@ -537,11 +537,11 @@ class TestCheckBlockers:
         with patch.object(ex, "ROOT", tmp_project):
             inst = ex.StepExecutor.__new__(ex.StepExecutor)
         inst._root = str(tmp_project)
-        inst._tasks_dir = tmp_project / "tasks"
+        inst._tasks_dir = tmp_project / "docs" / "sg" / "tasks"
         inst._task_dir = d
         inst._task_dir_name = "test-task"
         inst._index_file = d / "index.json"
-        inst._top_index_file = tmp_project / "tasks" / "index.json"
+        inst._top_index_file = tmp_project / "docs" / "sg" / "tasks" / "index.json"
         inst._task_name = "test"
         inst._total = len(steps)
         return inst

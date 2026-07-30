@@ -5,7 +5,7 @@ description: Knowledge-sync stage of the sg-* workflow. Harvests the decisions a
 
 This skill is the **knowledge-sync stage** of the sg-* workflow. It harvests the decisions made during a task — and the architecture/design changes they caused — from scattered, volatile outputs and syncs them into the **permanent docs** (`docs/*`, `CLAUDE.md`).
 
-Without this stage, knowledge gets trapped in the old `plan/` folder and the permanent docs drift from reality and rot.
+Without this stage, knowledge gets trapped in the volatile `docs/sg/plan/` folder and the permanent docs drift from reality and rot.
 
 ---
 
@@ -21,7 +21,7 @@ Without this stage, knowledge gets trapped in the old `plan/` folder and the per
 
 ### A. Collect inputs
 
-1. Read the target plan `plan/{yyyymmdd}_{task-name}/plan.md` to understand the **decisions and design intent**.
+1. Read the target plan `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` to understand the **decisions and design intent**.
 2. Read the `git diff` (or the changes on the task branch) to understand **what actually changed**.
 
 Combining these captures both "what and why (plan)" and "how it actually turned out (diff)".

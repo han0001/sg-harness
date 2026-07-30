@@ -5,7 +5,7 @@ description: Design stage of the sg-* workflow. Uses grill-me to resolve the dec
 
 This skill is the **design stage** of the sg-* workflow. It uses grill-me to resolve the decision tree and writes the result out to a plan document.
 
-**It does not implement.** The only output is a single `plan/{yyyymmdd}_{task-name}/plan.md` file. (No state file is created — pipeline stages are inferred from file existence.)
+**It does not implement.** The only output is a single `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` file. (No state file is created — pipeline stages are inferred from file existence.)
 
 ---
 
@@ -27,12 +27,12 @@ The goal is to clarify design intent enough that the next stage (`/sg-decompose-
 
 ### C. Generate the plan
 
-Once you reach agreement, get user approval and create `plan/{yyyymmdd}_{task-name}/plan.md`.
+Once you reach agreement, get user approval and create `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md`.
 
 - `{yyyymmdd}`: today's date (e.g. `20260616`).
 - `{task-name}`: a kebab-case slug (e.g. `csv-import`). Capture the core task in one or two words.
 
-**Naming contract (important):** the `{yyyymmdd}_{task-name}` folder name chosen here is reused verbatim by `/sg-decompose-task` when it creates `tasks/{yyyymmdd}_{task-name}/` under the **same name**, making it the **mapping key**. Choose the task name carefully.
+**Naming contract (important):** the `{yyyymmdd}_{task-name}` folder name chosen here is reused verbatim by `/sg-decompose-task` when it creates `docs/sg/tasks/{yyyymmdd}_{task-name}/` under the **same name**, making it the **mapping key**. Choose the task name carefully.
 
 #### plan.md structure
 

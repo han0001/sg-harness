@@ -3,7 +3,7 @@ name: sg-execute-task
 description: Execution stage of the sg-* workflow. Drives an isolated claude session per step sequentially via the bundled execute.py, over the task/step files produced by sg-decompose-task. Use when the steps are decomposed and ready to run, or when you need to "run the steps" / "execute the plan".
 ---
 
-This skill is the **execution stage** of the sg-* workflow. It takes the task/step files produced by `/sg-decompose-task` (under `tasks/{yyyymmdd}_{task-name}/`) and uses the bundled `execute.py` to drive an isolated claude session per **step**, sequentially and with self-correction.
+This skill is the **execution stage** of the sg-* workflow. It takes the task/step files produced by `/sg-decompose-task` (under `docs/sg/tasks/{yyyymmdd}_{task-name}/`) and uses the bundled `execute.py` to drive an isolated claude session per **step**, sequentially and with self-correction.
 
 > **Vocabulary** (see `CLAUDE.md` › Vocabulary for the canonical definitions): a **stage** is one skill; a **task** is one goal = one `plan.md`; a **step** is one decomposed, isolated unit of work. This stage runs the steps of a single task.
 
@@ -17,9 +17,9 @@ This skill is the **execution stage** of the sg-* workflow. It takes the task/st
 
 `/sg-decompose-task` must have already created, in the user's project (cwd):
 
-- `tasks/index.json` — the top-level status index (with this task's `dir` entry).
-- `tasks/{yyyymmdd}_{task-name}/index.json` — the task detail (`task` name + `steps[]`).
-- `tasks/{yyyymmdd}_{task-name}/step{N}.md` — one self-contained file per step.
+- `docs/sg/tasks/index.json` — the top-level status index (with this task's `dir` entry).
+- `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json` — the task detail (`task` name + `steps[]`).
+- `docs/sg/tasks/{yyyymmdd}_{task-name}/step{N}.md` — one self-contained file per step.
 
 If these are missing, run `/sg-decompose-task` first.
 
@@ -42,7 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once -
 
 > **⚠ Safety.** For each step, execute.py spins up a child claude session with permission checks disabled (`--dangerously-skip-permissions`) and automatically branches/commits (and pushes if requested) to the current project's git repo. Always get user approval before running.
 
-**Target = the current project (cwd).** execute.py treats the **git root of cwd** — not its own install location — as the project root, reading `tasks/`, `CLAUDE.md`, and `docs/` and committing to that repo. So this session must be running at the user's project root, and the step files created by `/sg-decompose-task` must live there too.
+**Target = the current project (cwd).** execute.py treats the **git root of cwd** — not its own install location — as the project root, reading `docs/sg/tasks/`, `CLAUDE.md`, and `docs/` and committing to that repo. So this session must be running at the user's project root, and the step files created by `/sg-decompose-task` must live there too.
 
 What execute.py handles automatically:
 
