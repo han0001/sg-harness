@@ -54,6 +54,35 @@ The interesting part lives in `skills/sg-execute-task/scripts/execute.py`, the o
 
 **Target = the git root of your current directory**, never the plugin's install location — so it always operates on the project you're standing in.
 
+### CLI version floor
+
+`execute.py` drives each child session with `--output-format stream-json` and `--json-schema`, and reads the step's pass/fail **verdict** out of the resulting structured output. An older CLI ignores an unknown `--json-schema` silently, so the failure mode would be a run that looks healthy while every step fails for a reason no log explains.
+
+To make that impossible, a **mandatory preflight** runs before any git or state mutation and aborts the run unless the local `claude` is at least:
+
+```text
+claude >= 2.1.216
+```
+
+The preflight also checks that `claude --help` advertises `--json-schema`, `--output-format`, and `stream-json`. It is deliberately not opt-out — a `--skip-preflight` flag would just make the silent-misbehaviour mode reachable again.
+
+### Timeout knobs
+
+A hung step is bounded in three layers rather than by one blunt wall-clock — an idle watchdog detects a hang fast, the wall-clock is only a backstop, and `--max-turns` catches a session that keeps emitting but loops forever. All three route into the same retry-then-`error` path.
+
+| Layer | Constant | Env override | Default | What it bounds |
+|-------|----------|--------------|---------|----------------|
+| ① idle | `T_IDLE_SEC` | `SG_T_IDLE_SEC` | `720` (12 min) | gap between two events on the child's stream — the primary hang detector |
+| ② wall-clock | `T_MAX_SEC` | `SG_T_MAX_SEC` | `5400` (90 min) | total time for one attempt — the backstop ceiling |
+| ③ turns | `MAX_TURNS` | `SG_MAX_TURNS` | `50` | the child's tool-loop count, passed as `--max-turns` |
+| (input to ①) | `BASH_MAX_TIMEOUT_MS` | `SG_BASH_MAX_TIMEOUT_MS` | `480000` (8 min) | the child's own Bash timeout, set on its environment |
+
+All four are integer environment overrides read at import time; a non-integer value logs a `WARN` and falls back to the default.
+
+`BASH_MAX_TIMEOUT_MS` is what makes `T_IDLE_SEC` safe to size: by capping the child's longest single Bash call ourselves, "maximum legitimate silence" becomes a value we *control* rather than one we guess, and the idle timeout sits above it with margin. If you raise it, raise `T_IDLE_SEC` to match.
+
+> Note the `SG_` prefix on the overrides. `BASH_MAX_TIMEOUT_MS` (no prefix) is the variable `execute.py` **sets on the child**; `SG_BASH_MAX_TIMEOUT_MS` is how **you** configure it.
+
 ---
 
 ## Install

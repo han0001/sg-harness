@@ -92,9 +92,9 @@ Fields recorded automatically on state transitions:
 
 | Transition | Recorded fields | Owner |
 |------------|----------------|-------|
-| → `completed` | `completed_at`, `summary` | Claude session (summary) + execute.py (timestamp) |
-| → `error` | `failed_at`, `error_message` | Claude session (message) + execute.py (timestamp) |
-| → `blocked` | `blocked_at`, `blocked_reason` | Claude session (reason) + execute.py (timestamp) |
+| → `completed` | `completed_at`, `summary` | execute.py (timestamp + `summary` from the step session's verdict) |
+| → `error` | `failed_at`, `error_message` | execute.py (timestamp + `error_message` from the verdict) |
+| → `blocked` | `blocked_at`, `blocked_reason` | execute.py (timestamp + `blocked_reason` from the verdict) |
 
 `summary` is a one-line summary of the step's output written on completion; execute.py accumulates it as context into subsequent step prompts. `created_at` and `started_at` are recorded automatically by execute.py.
 
@@ -132,10 +132,8 @@ npm test        # tests pass
    - Does it follow the ARCHITECTURE.md directory structure?
    - Does it stay within the ADR tech stack?
    - Does it violate any CLAUDE.md CRITICAL rule?
-3. Based on the result, update the corresponding step in `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json`:
-   - success → `"status": "completed"`, `"summary": "one-line summary of the output"`
-   - still failing after 3 fix attempts → `"status": "error"`, `"error_message": "concrete error detail"`
-   - user intervention needed → `"status": "blocked"`, `"blocked_reason": "concrete reason"`, then stop immediately
+3. Report the result through the verdict you return, not by editing files. execute.py is the
+   **sole writer** of `index.json` — it records this step's status from your verdict.
 
 ## Prohibited
 
