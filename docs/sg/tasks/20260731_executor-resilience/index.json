@@ -21,7 +21,10 @@
     {
       "step": 2,
       "name": "liveness-runner",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-03T14:23:51+0900",
+      "summary": "Replaced subprocess.run(timeout=1800) with Popen(start_new_session) + concurrent stdout/stderr reader threads, a pure timeout_decision watchdog (idle/wall) and a SIGTERM→grace→SIGKILL process-group kill; _execute_single_step now routes solely on AttemptResult/verdict via StateStore (the child's on-disk index.json is never read for control flow) and step{N}-output.json records all D10 diagnostics; 149 tests pass (111 kept + 38 new/rewritten).",
+      "completed_at": "2026-08-03T14:35:27+0900"
     },
     {
       "step": 3,
