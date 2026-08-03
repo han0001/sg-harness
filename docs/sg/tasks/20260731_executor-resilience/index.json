@@ -2,10 +2,34 @@
   "project": "sg-harness",
   "task": "executor-resilience",
   "steps": [
-    { "step": 0, "name": "state-store", "status": "pending" },
-    { "step": 1, "name": "verdict-contract", "status": "pending" },
-    { "step": 2, "name": "liveness-runner", "status": "pending" },
-    { "step": 3, "name": "preflight", "status": "pending" },
-    { "step": 4, "name": "contract-docs", "status": "pending" }
-  ]
+    {
+      "step": 0,
+      "name": "state-store",
+      "status": "completed",
+      "started_at": "2026-08-03T14:11:05+0900",
+      "summary": "Extracted StateStore in execute.py as sole writer of index.json/top-index (injected clock, named mark_* transitions); StepExecutor delegates via thin passthroughs — behavior-preserving, 72 tests pass (52 existing + 20 new TestStateStore).",
+      "completed_at": "2026-08-03T14:18:50+0900"
+    },
+    {
+      "step": 1,
+      "name": "verdict-contract",
+      "status": "pending"
+    },
+    {
+      "step": 2,
+      "name": "liveness-runner",
+      "status": "pending"
+    },
+    {
+      "step": 3,
+      "name": "preflight",
+      "status": "pending"
+    },
+    {
+      "step": 4,
+      "name": "contract-docs",
+      "status": "pending"
+    }
+  ],
+  "created_at": "2026-08-03T14:11:05+0900"
 }
