@@ -810,12 +810,15 @@ class StepExecutor:
             f"2. Do only the work specified in this step. Do not add extra features or files.\n"
             f"3. Do not break existing tests.\n"
             f"4. Run the AC (Acceptance Criteria) verification yourself.\n"
-            f"5. Update the corresponding step status in /docs/sg/tasks/{self._task_dir_name}/index.json:\n"
-            f"   - AC passes → \"completed\" + a one-line summary of this step's output in the \"summary\" field\n"
-            f"   - still failing after {self.MAX_RETRIES} fix attempts → record \"error\" + \"error_message\"\n"
-            f"   - if user intervention is needed (API key, auth, manual setup, etc.) → record \"blocked\" + \"blocked_reason\", then stop immediately\n"
+            f"5. Report the result ONLY through the verdict you return — do NOT edit "
+            f"/docs/sg/tasks/{self._task_dir_name}/index.json or any other harness state file. "
+            f"The harness is the sole writer of index.json and records this step's status from your verdict; "
+            f"anything you write there is discarded.\n"
+            f"   - AC passes → passed=true + a one-line summary of this step's output in \"summary\"\n"
+            f"   - still failing after {self.MAX_RETRIES} fix attempts → passed=false + a concrete \"error\"\n"
+            f"   - if user intervention is needed (API key, auth, manual setup, etc.) → blocked=true + \"blocked_reason\", then stop immediately\n"
             f"6. Do NOT commit or run any git command. The harness commits this step for you "
-            f"once the AC passes — your job is only to make the changes and update the status file.\n\n---\n\n"
+            f"once the AC passes — your job is only to make the changes, run the AC, and return the verdict.\n\n---\n\n"
         )
 
     # --- Claude invocation ---

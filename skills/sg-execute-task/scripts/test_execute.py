@@ -273,9 +273,16 @@ class TestBuildPreamble:
         result = executor._build_preamble("", "")
         assert str(ex.StepExecutor.MAX_RETRIES) in result
 
-    def test_includes_index_path(self, executor):
+    def test_forbids_editing_index_and_names_the_verdict_channel(self, executor):
+        # D6: execute.py is the sole writer of index.json. The preamble must name the file
+        # it may not touch (explicit over implicit) and point the child at the verdict as
+        # the one reporting channel — no leftover "update the status file" instruction.
         result = executor._build_preamble("", "")
-        assert "/docs/sg/tasks/0-mvp/index.json" in result
+        assert "do NOT edit /docs/sg/tasks/0-mvp/index.json" in result
+        assert "verdict" in result
+        assert "passed=true" in result
+        assert "blocked=true" in result
+        assert "Update the corresponding step status" not in result
 
 
 # ---------------------------------------------------------------------------
