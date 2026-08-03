@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NoReturn, Optional
 
 def _find_project_root() -> Path:
     """Find the root of the project being worked on.
@@ -166,6 +167,88 @@ def classify_outcome(verdict: Optional[dict], kill_reason: Optional[str]) -> str
         return OUTCOME_COMPLETED
     # `passed` false, missing, or a non-bool truthy value (e.g. "yes") — all ambiguous, all fail.
     return OUTCOME_FAIL
+
+
+# ---------------------------------------------------------------------------
+# Preflight — the mandatory capability gate (D9).
+#
+# The contract above only holds if the local `claude` actually implements it. An older CLI
+# ignores an unknown `--json-schema` without complaint and may truncate the stream tail, so
+# the failure mode is the worst kind: a run that looks healthy while every step fails for a
+# reason no log explains. Hence Fail-Fast — probe once, before ANY git or state mutation,
+# and refuse to start otherwise. Deliberately not a `--flag`: an opt-out would just make the
+# silent-misbehaviour mode reachable again.
+# ---------------------------------------------------------------------------
+
+# The floor is empirically verified, not guessed: `stream-json` + `--json-schema` was smoke-
+# tested end-to-end on this version (plan §7). Compared as a tuple so 2.1.9 < 2.1.216 — the
+# string comparison a version check invites gets that backwards.
+MIN_CLAUDE_VERSION = (2, 1, 216)
+
+# Substrings `claude --help` must advertise for the invocation in `_invoke_claude` to work.
+REQUIRED_CLI_CAPABILITIES = ("--json-schema", "--output-format", "stream-json")
+
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _parse_cli_version(text: str) -> Optional[tuple]:
+    """Extract (major, minor, patch) from `claude --version` output, or None if absent.
+
+    Today the output is `2.1.220 (Claude Code)`, but its exact shape is not a documented
+    contract — so we search for the first `x.y.z` instead of parsing positionally, and treat
+    "no version found" as a preflight failure rather than optimistically assuming it's new
+    enough.
+    """
+    match = _VERSION_RE.search(text or "")
+    return tuple(int(g) for g in match.groups()) if match else None
+
+
+def _preflight_abort(problem: str) -> NoReturn:
+    """Report what is wrong, what is required, and how to fix it — then stop the run."""
+    floor = ".".join(str(n) for n in MIN_CLAUDE_VERSION)
+    print(f"\n  ✗ Preflight failed: {problem}")
+    print(f"  This harness requires the `claude` CLI >= {floor}, supporting "
+          f"`--json-schema` and `--output-format stream-json`.")
+    print(f"  Fix: run `claude update` (or `npm install -g @anthropic-ai/claude-code@latest`), "
+          f"then re-run this command.")
+    sys.exit(1)
+
+
+def _probe_cli(run: Callable[..., subprocess.CompletedProcess], args: list) -> str:
+    """Run `claude <args>` and return its stdout; abort on anything but a clean exit.
+
+    A missing binary surfaces as OSError (FileNotFoundError) rather than a return code, so
+    both have to be handled — either way the answer is the same abort.
+    """
+    argv = ["claude"] + args
+    try:
+        proc = run(argv, capture_output=True, text=True)
+    except OSError as e:
+        _preflight_abort(f"could not execute `{' '.join(argv)}` ({e})")
+    if proc.returncode != 0:
+        _preflight_abort(f"`{' '.join(argv)}` exited with code {proc.returncode}: "
+                         f"{(proc.stderr or '').strip()[:200]}")
+    return proc.stdout or ""
+
+
+def preflight_check(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
+    """Abort the run unless the local `claude` can honour the verdict contract (D9).
+
+    Returns None and prints nothing when the CLI is usable — a gate that passes should be
+    invisible. The subprocess runner is injected so this is testable without a real CLI:
+    plan §6's default gate is L1 (no network, no auth, no cost).
+    """
+    version = _parse_cli_version(_probe_cli(run, ["--version"]))
+    if version is None:
+        _preflight_abort("`claude --version` printed no recognisable version number")
+    if version < MIN_CLAUDE_VERSION:
+        found = ".".join(str(n) for n in version)
+        _preflight_abort(f"the installed claude is {found}, older than the required floor")
+
+    help_text = _probe_cli(run, ["--help"])
+    missing = [cap for cap in REQUIRED_CLI_CAPABILITIES if cap not in help_text]
+    if missing:
+        _preflight_abort(f"this claude does not advertise {', '.join(missing)}")
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +693,9 @@ class StepExecutor:
         self._total = len(idx["steps"])
 
     def run(self, once: bool = False):
+        # First, before the header and before anything touches git or index.json: a CLI that
+        # cannot honour the verdict contract must abort the run, not half-mutate it (D9).
+        preflight_check()
         self._print_header()
         self._state.check_blockers()
         self._checkout_branch()

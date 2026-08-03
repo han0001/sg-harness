@@ -1251,3 +1251,111 @@ class TestRunChildIntegration:
         result = _run_child(cmd, tmp_path)
         assert result.outcome == ex.OUTCOME_COMPLETED
         assert result.verdict == {"passed": True, "summary": "recovered"}
+
+
+# ---------------------------------------------------------------------------
+# preflight_check — the mandatory capability gate (fake CLI; no real `claude`)
+# ---------------------------------------------------------------------------
+
+# Trimmed from the real `claude --help`, keeping the substrings the gate looks for.
+CLI_HELP = """Usage: claude [options] [command]
+
+Options:
+  --json-schema <schema>       JSON Schema for structured output validation.
+  --output-format <format>     Output format (only works with --print): "text"
+                               (default), "json", or "stream-json" (realtime)
+"""
+
+
+def _fake_cli(version_out="2.1.216 (Claude Code)", help_out=CLI_HELP,
+              version_rc=0, help_rc=0, raises=None):
+    """A subprocess.run stand-in answering `claude --version` / `claude --help`."""
+    def run(cmd, **kwargs):
+        if raises is not None:
+            raise raises
+        if "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, version_rc, version_out, "boom\n")
+        return subprocess.CompletedProcess(cmd, help_rc, help_out, "")
+    return run
+
+
+class TestPreflight:
+    def test_a_cli_at_the_floor_passes_quietly(self, capsys):
+        assert ex.preflight_check(_fake_cli(version_out="2.1.216 (Claude Code)")) is None
+        assert capsys.readouterr().out == ""    # a gate that passes should be invisible
+
+    @pytest.mark.parametrize("version", ["2.1.217", "2.1.220", "2.2.0", "3.0.1", "10.0.0"])
+    def test_versions_above_the_floor_pass(self, version):
+        assert ex.preflight_check(_fake_cli(version_out=f"{version} (Claude Code)")) is None
+
+    @pytest.mark.parametrize("version", ["2.1.215", "2.1.9", "2.0.999", "1.9.9"])
+    def test_a_version_below_the_floor_aborts_naming_the_floor(self, version, capsys):
+        # 2.1.9 is in here on purpose: a string comparison would call it newer than 2.1.216.
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(version_out=f"{version} (Claude Code)"))
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "2.1.216" in out         # the required floor...
+        assert version in out           # ...what was actually installed...
+        assert "claude update" in out   # ...and the remedy
+        assert "--json-schema" in out and "stream-json" in out
+
+    def test_a_missing_claude_binary_aborts(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(raises=FileNotFoundError("claude")))
+        assert exc_info.value.code == 1
+        assert "2.1.216" in capsys.readouterr().out
+
+    def test_a_nonzero_version_probe_aborts(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(version_rc=127))
+        assert exc_info.value.code == 1
+        assert "127" in capsys.readouterr().out
+
+    def test_an_unparseable_version_aborts(self):
+        # Fail-Fast: an unrecognised version is not evidence that the CLI is new enough.
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(version_out="unknown build\n"))
+        assert exc_info.value.code == 1
+
+    def test_a_nonzero_help_probe_aborts(self):
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(help_rc=1))
+        assert exc_info.value.code == 1
+
+    @pytest.mark.parametrize("capability", ex.REQUIRED_CLI_CAPABILITIES)
+    def test_a_missing_capability_aborts_naming_it(self, capability, capsys):
+        stripped = CLI_HELP.replace(capability, "--redacted")
+        with pytest.raises(SystemExit) as exc_info:
+            ex.preflight_check(_fake_cli(help_out=stripped))
+        assert exc_info.value.code == 1
+        assert capability in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# run() ordering — preflight gates the run before git/state are touched (D9)
+# ---------------------------------------------------------------------------
+
+class TestRunPreflightsFirst:
+    def test_preflight_runs_before_blockers_checkout_and_state(self, executor, tmp_project):
+        order = []
+        with patch.object(ex, "ROOT", tmp_project), \
+             patch.object(ex, "preflight_check", side_effect=lambda: order.append("preflight")), \
+             patch.object(executor._state, "check_blockers", side_effect=lambda: order.append("blockers")), \
+             patch.object(executor, "_checkout_branch", side_effect=lambda: order.append("checkout")), \
+             patch.object(executor._state, "ensure_created_at", side_effect=lambda: order.append("created_at")), \
+             patch.object(executor, "_execute_all_steps", return_value=False):
+            executor.run()
+        assert order == ["preflight", "blockers", "checkout", "created_at"]
+
+    def test_a_failing_preflight_leaves_git_and_index_untouched(self, executor):
+        before = executor._index_file.read_text()
+        with patch.object(ex, "preflight_check", side_effect=SystemExit(1)), \
+             patch.object(executor, "_checkout_branch") as checkout, \
+             patch.object(executor, "_run_git") as git, \
+             patch.object(executor, "_execute_all_steps") as steps:
+            with pytest.raises(SystemExit) as exc_info:
+                executor.run()
+        assert exc_info.value.code == 1
+        assert checkout.call_count == 0 and git.call_count == 0 and steps.call_count == 0
+        assert executor._index_file.read_text() == before   # created_at was never stamped
