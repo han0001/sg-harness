@@ -19,7 +19,7 @@ import time
 import types
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 def _find_project_root() -> Path:
     """Find the root of the project being worked on.
@@ -41,6 +41,13 @@ def _find_project_root() -> Path:
 
 
 ROOT = _find_project_root()
+
+TZ = timezone(timedelta(hours=9))
+
+
+def kst_stamp() -> str:
+    """The timestamp every state transition is recorded with (KST, e.g. 2026-08-03T14:11:05+0900)."""
+    return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 @contextlib.contextmanager
@@ -71,13 +78,188 @@ def progress_indicator(label: str):
         info.elapsed = time.monotonic() - t0
 
 
+class StateStore:
+    """Sole owner of the task state files: the per-task `index.json` and the top-level index.
+
+    Every read, write, status transition and timestamp for those two files lives here, and
+    the Runner (`StepExecutor`) never writes them directly. Concentrating them in one class
+    makes the single-writer property structural rather than a convention.
+
+    The clock is injected (`now`) so transitions are assertable without real time.
+    """
+
+    def __init__(self, index_file: Path, top_index_file: Path, task_dir_name: str,
+                 *, now: Callable[[], str] = kst_stamp):
+        self._index_file = index_file
+        self._top_index_file = top_index_file
+        self._task_dir_name = task_dir_name
+        self._now = now
+
+    # --- JSON I/O ---
+
+    @staticmethod
+    def read_json(p: Path) -> dict:
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def write_json(p: Path, data: dict):
+        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # --- timestamps ---
+
+    def stamp(self) -> str:
+        return self._now()
+
+    # --- reads ---
+
+    def load(self) -> dict:
+        return self.read_json(self._index_file)
+
+    def _field_of(self, step_num: int, key: str, default):
+        return next((s.get(key, default) for s in self.load()["steps"] if s["step"] == step_num), default)
+
+    def status_of(self, step_num: int) -> str:
+        return self._field_of(step_num, "status", "pending")
+
+    def summary_of(self, step_num: int) -> str:
+        return self._field_of(step_num, "summary", "")
+
+    def error_of(self, step_num: int, default: str = "Step did not update status") -> str:
+        return self._field_of(step_num, "error_message", default)
+
+    def blocked_reason_of(self, step_num: int) -> str:
+        return self._field_of(step_num, "blocked_reason", "")
+
+    def next_pending(self) -> Optional[dict]:
+        return next((s for s in self.load()["steps"] if s["status"] == "pending"), None)
+
+    def count_completed(self) -> int:
+        return sum(1 for s in self.load()["steps"] if s["status"] == "completed")
+
+    @staticmethod
+    def build_step_context(index: dict) -> str:
+        lines = [
+            f"- Step {s['step']} ({s['name']}): {s['summary']}"
+            for s in index["steps"]
+            if s["status"] == "completed" and s.get("summary")
+        ]
+        if not lines:
+            return ""
+        return "## Previous step outputs\n\n" + "\n".join(lines) + "\n\n"
+
+    # --- status transitions (the only writers of index.json) ---
+
+    def _mutate_step(self, step_num: int, apply: Callable[[dict], None]):
+        index = self.load()
+        for s in index["steps"]:
+            if s["step"] == step_num:
+                apply(s)
+        self.write_json(self._index_file, index)
+
+    def mark_started(self, step_num: int):
+        """Stamp `started_at` if absent. Already-started steps are left untouched (no write)."""
+        index = self.load()
+        for s in index["steps"]:
+            if s["step"] == step_num and "started_at" not in s:
+                s["started_at"] = self._now()
+                self.write_json(self._index_file, index)
+                return
+
+    def mark_completed(self, step_num: int, summary: Optional[str] = None):
+        """Stamp `completed_at`. `summary=None` keeps whatever summary is already recorded."""
+        def apply(s):
+            s["status"] = "completed"
+            s["completed_at"] = self._now()
+            if summary is not None:
+                s["summary"] = summary
+        self._mutate_step(step_num, apply)
+
+    def mark_blocked(self, step_num: int, reason: Optional[str] = None):
+        """Stamp `blocked_at`. `reason=None` keeps whatever blocked_reason is already recorded."""
+        def apply(s):
+            s["status"] = "blocked"
+            s["blocked_at"] = self._now()
+            if reason is not None:
+                s["blocked_reason"] = reason
+        self._mutate_step(step_num, apply)
+
+    def mark_retry(self, step_num: int):
+        """Reset the step for another attempt: back to pending, previous error dropped."""
+        def apply(s):
+            s["status"] = "pending"
+            s.pop("error_message", None)
+        self._mutate_step(step_num, apply)
+
+    def mark_error(self, step_num: int, message: str):
+        def apply(s):
+            s["status"] = "error"
+            s["error_message"] = message
+            s["failed_at"] = self._now()
+        self._mutate_step(step_num, apply)
+
+    # --- task-level transitions ---
+
+    def ensure_created_at(self):
+        index = self.load()
+        if "created_at" not in index:
+            index["created_at"] = self._now()
+            self.write_json(self._index_file, index)
+
+    def mark_task_completed(self):
+        index = self.load()
+        index["completed_at"] = self._now()
+        self.write_json(self._index_file, index)
+
+    def update_top_index(self, status: str):
+        if not self._top_index_file.exists():
+            return
+        top = self.read_json(self._top_index_file)
+        ts = self._now()
+        matched = False
+        for task in top.get("tasks", []):
+            if task.get("dir") == self._task_dir_name:
+                task["status"] = status
+                ts_key = {"completed": "completed_at", "error": "failed_at", "blocked": "blocked_at"}.get(status)
+                if ts_key:
+                    task[ts_key] = ts
+                matched = True
+                break
+        if not matched:
+            # Fail-Fast: if this task entry is missing from the top index, the status silently desyncs.
+            # Warn explicitly instead of staying silent. (dir must match the folder name exactly.)
+            print(f"  WARN: top index (docs/sg/tasks/index.json) has no entry with dir='{self._task_dir_name}', "
+                  f"so status ('{status}') could not be recorded. Check that dir matches the folder name.")
+            return
+        self.write_json(self._top_index_file, top)
+
+    # --- checks ---
+
+    def check_blockers(self):
+        index = self.load()
+        for s in reversed(index["steps"]):
+            if s["status"] == "error":
+                print(f"\n  ✗ Step {s['step']} ({s['name']}) failed.")
+                print(f"  Error: {s.get('error_message', 'unknown')}")
+                print(f"  Fix and reset status to 'pending' to retry.")
+                sys.exit(1)
+            if s["status"] == "blocked":
+                print(f"\n  ⏸ Step {s['step']} ({s['name']}) blocked.")
+                print(f"  Reason: {s.get('blocked_reason', 'unknown')}")
+                print(f"  Resolve and reset status to 'pending' to retry.")
+                sys.exit(2)
+            if s["status"] != "pending":
+                break
+
+
 class StepExecutor:
-    """Harness that runs the steps inside a task directory sequentially."""
+    """Harness that runs the steps inside a task directory sequentially.
+
+    Owns execution, retry and git; all task state is delegated to its `StateStore`.
+    """
 
     MAX_RETRIES = 3
     FEAT_MSG = "feat({task}): step {num} — {name}"
     CHORE_MSG = "chore({task}): step {num} output"
-    TZ = timezone(timedelta(hours=9))
 
     def __init__(self, task_dir_name: str, *, auto_push: bool = False):
         self._root = str(ROOT)
@@ -96,35 +278,45 @@ class StepExecutor:
             print(f"ERROR: {self._index_file} not found")
             sys.exit(1)
 
-        idx = self._read_json(self._index_file)
+        self._state = StateStore(self._index_file, self._top_index_file, task_dir_name)
+
+        idx = self._state.load()
         self._project = idx.get("project", "project")
         self._task_name = idx.get("task", task_dir_name)
         self._total = len(idx["steps"])
 
     def run(self, once: bool = False):
         self._print_header()
-        self._check_blockers()
+        self._state.check_blockers()
         self._checkout_branch()
         guardrails = self._load_guardrails()
-        self._ensure_created_at()
+        self._state.ensure_created_at()
         all_done = self._execute_all_steps(guardrails, once=once)
         if all_done:
             self._finalize()
 
-    # --- timestamps ---
+    # --- state delegation (StateStore is the owner; these are thin passthroughs) ---
 
     def _stamp(self) -> str:
-        return datetime.now(self.TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
-
-    # --- JSON I/O ---
+        return self._state.stamp()
 
     @staticmethod
     def _read_json(p: Path) -> dict:
-        return json.loads(p.read_text(encoding="utf-8"))
+        return StateStore.read_json(p)
 
     @staticmethod
     def _write_json(p: Path, data: dict):
-        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        StateStore.write_json(p, data)
+
+    @staticmethod
+    def _build_step_context(index: dict) -> str:
+        return StateStore.build_step_context(index)
+
+    def _check_blockers(self):
+        self._state.check_blockers()
+
+    def _update_top_index(self, status: str):
+        self._state.update_top_index(status)
 
     # --- git ---
 
@@ -178,30 +370,6 @@ class StepExecutor:
             if r.returncode != 0:
                 print(f"  WARN: housekeeping commit failed: {r.stderr.strip()}")
 
-    # --- top-level index ---
-
-    def _update_top_index(self, status: str):
-        if not self._top_index_file.exists():
-            return
-        top = self._read_json(self._top_index_file)
-        ts = self._stamp()
-        matched = False
-        for task in top.get("tasks", []):
-            if task.get("dir") == self._task_dir_name:
-                task["status"] = status
-                ts_key = {"completed": "completed_at", "error": "failed_at", "blocked": "blocked_at"}.get(status)
-                if ts_key:
-                    task[ts_key] = ts
-                matched = True
-                break
-        if not matched:
-            # Fail-Fast: if this task entry is missing from the top index, the status silently desyncs.
-            # Warn explicitly instead of staying silent. (dir must match the folder name exactly.)
-            print(f"  WARN: top index (docs/sg/tasks/index.json) has no entry with dir='{self._task_dir_name}', "
-                  f"so status ('{status}') could not be recorded. Check that dir matches the folder name.")
-            return
-        self._write_json(self._top_index_file, top)
-
     # --- guardrails & context ---
 
     def _load_guardrails(self) -> str:
@@ -214,17 +382,6 @@ class StepExecutor:
             for doc in sorted(docs_dir.glob("*.md")):
                 sections.append(f"## {doc.stem}\n\n{doc.read_text()}")
         return "\n\n---\n\n".join(sections) if sections else ""
-
-    @staticmethod
-    def _build_step_context(index: dict) -> str:
-        lines = [
-            f"- Step {s['step']} ({s['name']}): {s['summary']}"
-            for s in index["steps"]
-            if s["status"] == "completed" and s.get("summary")
-        ]
-        if not lines:
-            return ""
-        return "## Previous step outputs\n\n" + "\n".join(lines) + "\n\n"
 
     def _build_preamble(self, guardrails: str, step_context: str,
                         prev_error: Optional[str] = None) -> str:
@@ -293,39 +450,16 @@ class StepExecutor:
             print(f"  Auto-push: enabled")
         print(f"{'='*60}")
 
-    def _check_blockers(self):
-        index = self._read_json(self._index_file)
-        for s in reversed(index["steps"]):
-            if s["status"] == "error":
-                print(f"\n  ✗ Step {s['step']} ({s['name']}) failed.")
-                print(f"  Error: {s.get('error_message', 'unknown')}")
-                print(f"  Fix and reset status to 'pending' to retry.")
-                sys.exit(1)
-            if s["status"] == "blocked":
-                print(f"\n  ⏸ Step {s['step']} ({s['name']}) blocked.")
-                print(f"  Reason: {s.get('blocked_reason', 'unknown')}")
-                print(f"  Resolve and reset status to 'pending' to retry.")
-                sys.exit(2)
-            if s["status"] != "pending":
-                break
-
-    def _ensure_created_at(self):
-        index = self._read_json(self._index_file)
-        if "created_at" not in index:
-            index["created_at"] = self._stamp()
-            self._write_json(self._index_file, index)
-
     # --- execution loop ---
 
     def _execute_single_step(self, step: dict, guardrails: str) -> bool:
         """Run a single step (including retries). True on completion, False on failure/blocked."""
         step_num, step_name = step["step"], step["name"]
-        done = sum(1 for s in self._read_json(self._index_file)["steps"] if s["status"] == "completed")
+        done = self._state.count_completed()
         prev_error = None
 
         for attempt in range(1, self.MAX_RETRIES + 1):
-            index = self._read_json(self._index_file)
-            step_context = self._build_step_context(index)
+            step_context = self._state.build_step_context(self._state.load())
             preamble = self._build_preamble(guardrails, step_context, prev_error)
 
             tag = f"Step {step_num}/{self._total - 1} ({done} done): {step_name}"
@@ -336,58 +470,38 @@ class StepExecutor:
                 self._invoke_claude(step, preamble)
                 elapsed = int(pi.elapsed)
 
-            index = self._read_json(self._index_file)
-            status = next((s.get("status", "pending") for s in index["steps"] if s["step"] == step_num), "pending")
-            ts = self._stamp()
+            status = self._state.status_of(step_num)
 
             if status == "completed":
-                for s in index["steps"]:
-                    if s["step"] == step_num:
-                        s["completed_at"] = ts
-                self._write_json(self._index_file, index)
+                self._state.mark_completed(step_num)
                 self._commit_step(step_num, step_name)
-                summary = next((s.get("summary", "") for s in index["steps"] if s["step"] == step_num), "")
-                nxt = next((s for s in index["steps"] if s["status"] == "pending"), None)
+                summary = self._state.summary_of(step_num)
+                nxt = self._state.next_pending()
                 print(f"  ✓ Step {step_num}/{self._total - 1}: {step_name} [{elapsed}s] — {summary}")
                 if nxt:
                     print(f"    Next ▶ Step {nxt['step']} {nxt['name']}")
                 return True
 
             if status == "blocked":
-                for s in index["steps"]:
-                    if s["step"] == step_num:
-                        s["blocked_at"] = ts
-                self._write_json(self._index_file, index)
-                reason = next((s.get("blocked_reason", "") for s in index["steps"] if s["step"] == step_num), "")
+                self._state.mark_blocked(step_num)
+                reason = self._state.blocked_reason_of(step_num)
                 print(f"  ⏸ Step {step_num}: {step_name} blocked [{elapsed}s]")
                 print(f"    Reason: {reason}")
-                self._update_top_index("blocked")
+                self._state.update_top_index("blocked")
                 sys.exit(2)
 
-            err_msg = next(
-                (s.get("error_message", "Step did not update status") for s in index["steps"] if s["step"] == step_num),
-                "Step did not update status",
-            )
+            err_msg = self._state.error_of(step_num)
 
             if attempt < self.MAX_RETRIES:
-                for s in index["steps"]:
-                    if s["step"] == step_num:
-                        s["status"] = "pending"
-                        s.pop("error_message", None)
-                self._write_json(self._index_file, index)
+                self._state.mark_retry(step_num)
                 prev_error = err_msg
                 print(f"  ↻ Step {step_num}: retry {attempt}/{self.MAX_RETRIES} — {err_msg}")
             else:
-                for s in index["steps"]:
-                    if s["step"] == step_num:
-                        s["status"] = "error"
-                        s["error_message"] = f"[failed after {self.MAX_RETRIES} attempts] {err_msg}"
-                        s["failed_at"] = ts
-                self._write_json(self._index_file, index)
+                self._state.mark_error(step_num, f"[failed after {self.MAX_RETRIES} attempts] {err_msg}")
                 self._commit_step(step_num, step_name)
                 print(f"  ✗ Step {step_num}: {step_name} failed after {self.MAX_RETRIES} attempts [{elapsed}s]")
                 print(f"    Error: {err_msg}")
-                self._update_top_index("error")
+                self._state.update_top_index("error")
                 sys.exit(1)
 
         return False  # unreachable
@@ -396,31 +510,20 @@ class StepExecutor:
         """Run pending steps. Returns True when no pending steps remain (task done).
         In once mode, runs a single step and returns whether that was the last one."""
         while True:
-            index = self._read_json(self._index_file)
-            pending = next((s for s in index["steps"] if s["status"] == "pending"), None)
+            pending = self._state.next_pending()
             if pending is None:
                 print("\n  All steps completed!")
                 return True
 
-            step_num = pending["step"]
-            for s in index["steps"]:
-                if s["step"] == step_num and "started_at" not in s:
-                    s["started_at"] = self._stamp()
-                    self._write_json(self._index_file, index)
-                    break
-
+            self._state.mark_started(pending["step"])
             self._execute_single_step(pending, guardrails)
 
             if once:
-                remaining = self._read_json(self._index_file)
-                more = any(s["status"] == "pending" for s in remaining["steps"])
-                return not more
+                return self._state.next_pending() is None
 
     def _finalize(self):
-        index = self._read_json(self._index_file)
-        index["completed_at"] = self._stamp()
-        self._write_json(self._index_file, index)
-        self._update_top_index("completed")
+        self._state.mark_task_completed()
+        self._state.update_top_index("completed")
 
         self._run_git("add", "-A")
         if self._run_git("diff", "--cached", "--quiet").returncode != 0:

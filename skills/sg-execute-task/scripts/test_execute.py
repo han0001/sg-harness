@@ -104,9 +104,9 @@ class TestStamp:
         assert dt.tzinfo is not None
 
     def test_is_current_time(self, executor):
-        before = datetime.now(ex.StepExecutor.TZ).replace(microsecond=0)
+        before = datetime.now(ex.TZ).replace(microsecond=0)
         result = executor._stamp()
-        after = datetime.now(ex.StepExecutor.TZ).replace(microsecond=0) + timedelta(seconds=1)
+        after = datetime.now(ex.TZ).replace(microsecond=0) + timedelta(seconds=1)
         parsed = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S%z")
         assert before <= parsed <= after
 
@@ -312,10 +312,10 @@ class TestUpdateTopIndex:
         assert polish["status"] == "pending"
 
     def test_nonexistent_dir_warns(self, executor, top_index, capsys):
-        executor._top_index_file = top_index
-        executor._task_dir_name = "no-such-dir"
+        # task_dir_name is owned by the StateStore, so target it directly.
+        store = ex.StateStore(executor._index_file, top_index, "no-such-dir")
         original = json.loads(top_index.read_text())
-        executor._update_top_index("completed")
+        store.update_top_index("completed")
         after = json.loads(top_index.read_text())
         # No invalid status is recorded, so the file is unchanged
         for t_before, t_after in zip(original["tasks"], after["tasks"]):
@@ -326,8 +326,8 @@ class TestUpdateTopIndex:
         assert "no-such-dir" in out
 
     def test_no_top_index_file(self, executor, tmp_path):
-        executor._top_index_file = tmp_path / "nonexistent.json"
-        executor._update_top_index("completed")  # should not raise
+        store = ex.StateStore(executor._index_file, tmp_path / "nonexistent.json", "0-mvp")
+        store.update_top_index("completed")  # should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +542,7 @@ class TestCheckBlockers:
         inst._task_dir_name = "test-task"
         inst._index_file = d / "index.json"
         inst._top_index_file = tmp_project / "docs" / "sg" / "tasks" / "index.json"
+        inst._state = ex.StateStore(inst._index_file, inst._top_index_file, "test-task")
         inst._task_name = "test"
         inst._total = len(steps)
         return inst
@@ -593,3 +594,140 @@ class TestExecuteOnce:
                  if s["status"] == "pending"]
         assert len(still) == 1      # ran exactly one step; one remains
         assert all_done is False    # not done → run() will not finalize
+
+
+# ---------------------------------------------------------------------------
+# StateStore — sole owner of index.json + the top index
+# ---------------------------------------------------------------------------
+
+STAMP = "2026-01-02T03:04:05+0900"
+
+
+@pytest.fixture
+def store(tmp_project, task_dir):
+    """A StateStore over the 3-step task fixture, with the clock injected (no real time)."""
+    return ex.StateStore(
+        task_dir / "index.json",
+        tmp_project / "docs" / "sg" / "tasks" / "index.json",
+        "0-mvp",
+        now=lambda: STAMP,
+    )
+
+
+def _step(store, num):
+    return next(s for s in store.load()["steps"] if s["step"] == num)
+
+
+class TestStateStore:
+    # --- transitions: correct status + timestamp key, exact injected stamp ---
+
+    def test_mark_started(self, store):
+        store.mark_started(2)
+        assert _step(store, 2)["started_at"] == STAMP
+
+    def test_mark_started_keeps_existing(self, store):
+        index = store.load()
+        index["steps"][2]["started_at"] = "2020-01-01T00:00:00+0900"
+        store.write_json(store._index_file, index)
+        store.mark_started(2)
+        assert _step(store, 2)["started_at"] == "2020-01-01T00:00:00+0900"
+
+    def test_mark_completed(self, store):
+        store.mark_completed(2, "ui shipped")
+        s = _step(store, 2)
+        assert s["status"] == "completed"
+        assert s["completed_at"] == STAMP
+        assert s["summary"] == "ui shipped"
+
+    def test_mark_completed_keeps_existing_summary(self, store):
+        store.mark_completed(1)
+        s = _step(store, 1)
+        assert s["completed_at"] == STAMP
+        assert s["summary"] == "core logic implemented"
+
+    def test_mark_blocked(self, store):
+        store.mark_blocked(2, "needs API key")
+        s = _step(store, 2)
+        assert s["status"] == "blocked"
+        assert s["blocked_at"] == STAMP
+        assert s["blocked_reason"] == "needs API key"
+
+    def test_mark_retry(self, store):
+        store.mark_error(2, "boom")
+        store.mark_retry(2)
+        s = _step(store, 2)
+        assert s["status"] == "pending"
+        assert "error_message" not in s
+
+    def test_mark_error(self, store):
+        store.mark_error(2, "AC failed")
+        s = _step(store, 2)
+        assert s["status"] == "error"
+        assert s["error_message"] == "AC failed"
+        assert s["failed_at"] == STAMP
+
+    def test_ensure_created_at(self, store):
+        store.ensure_created_at()
+        assert store.load()["created_at"] == STAMP
+
+    def test_ensure_created_at_keeps_existing(self, store):
+        index = store.load()
+        index["created_at"] = "2020-01-01T00:00:00+0900"
+        store.write_json(store._index_file, index)
+        store.ensure_created_at()
+        assert store.load()["created_at"] == "2020-01-01T00:00:00+0900"
+
+    def test_mark_task_completed(self, store):
+        store.mark_task_completed()
+        assert store.load()["completed_at"] == STAMP
+
+    def test_update_top_index_uses_injected_clock(self, store, top_index):
+        store.update_top_index("completed")
+        mvp = next(t for t in json.loads(top_index.read_text())["tasks"] if t["dir"] == "0-mvp")
+        assert mvp["status"] == "completed"
+        assert mvp["completed_at"] == STAMP
+
+    # --- reads ---
+
+    def test_next_pending(self, store):
+        assert store.next_pending()["step"] == 2
+
+    def test_next_pending_none_when_all_done(self, store):
+        store.mark_completed(2)
+        assert store.next_pending() is None
+
+    def test_count_completed(self, store):
+        assert store.count_completed() == 2
+        store.mark_completed(2)
+        assert store.count_completed() == 3
+
+    def test_status_of_defaults_to_pending(self, store):
+        assert store.status_of(2) == "pending"
+        assert store.status_of(99) == "pending"   # unknown step
+
+    def test_error_of_default(self, store):
+        assert store.error_of(2) == "Step did not update status"
+
+    def test_build_step_context(self, store):
+        result = store.build_step_context(store.load())
+        assert result.startswith("## Previous step outputs")
+        assert "Step 0 (setup): project initialized" in result
+        assert "Step 1 (core): core logic implemented" in result
+        assert "ui" not in result
+
+    # --- blockers ---
+
+    def test_check_blockers_error_exits_1(self, store):
+        store.mark_error(2, "boom")
+        with pytest.raises(SystemExit) as exc_info:
+            store.check_blockers()
+        assert exc_info.value.code == 1
+
+    def test_check_blockers_blocked_exits_2(self, store):
+        store.mark_blocked(2, "needs API key")
+        with pytest.raises(SystemExit) as exc_info:
+            store.check_blockers()
+        assert exc_info.value.code == 2
+
+    def test_check_blockers_passes_when_clean(self, store):
+        store.check_blockers()  # steps are completed/pending → no exit
