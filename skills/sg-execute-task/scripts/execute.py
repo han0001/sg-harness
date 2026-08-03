@@ -78,6 +78,93 @@ def progress_indicator(label: str):
         info.elapsed = time.monotonic() - t0
 
 
+# ---------------------------------------------------------------------------
+# Verdict contract — the pure core.
+#
+# The child session no longer edits `index.json`; it is invoked with `--json-schema` and
+# reports a verdict through the final `result` event's `structured_output`. Everything
+# below is pure: no subprocess, no threads, no clock, no file I/O — the Runner owns all of
+# that. The stream-json event schema is officially undocumented, so every function here
+# parses defensively: ambiguity resolves to `fail`, never to a raised exception.
+# ---------------------------------------------------------------------------
+
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "summary": {"type": "string"},
+        "error": {"type": "string"},
+        "blocked": {"type": "boolean"},
+        "blocked_reason": {"type": "string"},
+    },
+    "required": ["passed"],
+    # Diagnosability: a failure must say why, a block must say what it needs. Each `if`
+    # repeats the key in its own `required` — without that, `properties` is vacuously
+    # satisfied by an object that omits the key, and the `then` clause would fire on
+    # verdicts that never mentioned `passed`/`blocked` at all.
+    "allOf": [
+        {
+            "if": {"properties": {"passed": {"const": False}}, "required": ["passed"]},
+            "then": {"required": ["error"]},
+        },
+        {
+            "if": {"properties": {"blocked": {"const": True}}, "required": ["blocked"]},
+            "then": {"required": ["blocked_reason"]},
+        },
+    ],
+}
+
+# The closed vocabulary `classify_outcome` returns; the Runner routes on exactly these.
+OUTCOME_COMPLETED = "completed"
+OUTCOME_BLOCKED = "blocked"
+OUTCOME_FAIL = "fail"
+
+
+def is_result_event(obj: dict) -> bool:
+    """True if `obj` looks like the final `result` event of a stream-json stream.
+
+    Lenient by design: the event schema is undocumented, so we key only on a `type`/`role`
+    field literally equal to "result" and assume nothing else about the shape.
+    """
+    if not isinstance(obj, dict):
+        return False
+    return any(obj.get(key) == "result" for key in ("type", "role"))
+
+
+def parse_verdict(result_event: dict) -> Optional[dict]:
+    """Extract the child's verdict from an already-parsed `result` event.
+
+    Returns the `structured_output` dict, or None when it is absent or not a dict — which
+    covers a `success` subtype carrying no `structured_output` (D7). Never raises: an
+    unexpected stream shape must degrade to `fail`, not to a traceback (that crash class is
+    exactly what this task removes).
+    """
+    if not isinstance(result_event, dict):
+        return None
+    verdict = result_event.get("structured_output")
+    return verdict if isinstance(verdict, dict) else None
+
+
+def classify_outcome(verdict: Optional[dict], kill_reason: Optional[str]) -> str:
+    """Map (verdict, kill_reason) onto exactly one outcome: completed / blocked / fail.
+
+    D7 routes every failure mode — a timeout kill (`kill_reason`, e.g. "timeout-idle"), a
+    missing or malformed verdict, and an explicit `passed=false` — into the single `fail`
+    channel the retry loop already handles. `blocked` outranks `passed` so a child needing
+    human intervention stops the run even if it also claimed to pass.
+    """
+    if kill_reason:
+        return OUTCOME_FAIL
+    if not isinstance(verdict, dict):
+        return OUTCOME_FAIL
+    if verdict.get("blocked") is True:
+        return OUTCOME_BLOCKED
+    if verdict.get("passed") is True:
+        return OUTCOME_COMPLETED
+    # `passed` false, missing, or a non-bool truthy value (e.g. "yes") — all ambiguous, all fail.
+    return OUTCOME_FAIL
+
+
 class StateStore:
     """Sole owner of the task state files: the per-task `index.json` and the top-level index.
 

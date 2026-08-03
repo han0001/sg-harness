@@ -731,3 +731,149 @@ class TestStateStore:
 
     def test_check_blockers_passes_when_clean(self, store):
         store.check_blockers()  # steps are completed/pending → no exit
+
+
+# ---------------------------------------------------------------------------
+# Verdict contract — the pure core (no subprocess, no threads, no clock, no file I/O)
+# ---------------------------------------------------------------------------
+
+_ABSENT = object()
+
+
+def _result_event(structured_output=_ABSENT, subtype="success"):
+    """A stream-json `result` event; omit structured_output to model the absent case."""
+    event = {"type": "result", "subtype": subtype}
+    if structured_output is not _ABSENT:
+        event["structured_output"] = structured_output
+    return event
+
+
+def _conditional_for(key, const_value):
+    """The schema's `if/then` rule guarding `key == const_value`, or None."""
+    for rule in ex.VERDICT_SCHEMA.get("allOf", []):
+        cond = rule.get("if", {})
+        if cond.get("properties", {}).get(key, {}).get("const") is const_value:
+            return rule
+    return None
+
+
+class TestVerdictContract:
+    # --- verdict → outcome (T1-B cases) ---
+
+    def test_passed_true_is_completed(self):
+        verdict = ex.parse_verdict(_result_event({"passed": True, "summary": "done"}))
+        assert ex.classify_outcome(verdict, None) == ex.OUTCOME_COMPLETED
+
+    def test_passed_false_is_fail(self):
+        verdict = ex.parse_verdict(_result_event({"passed": False, "error": "AC failed"}))
+        assert ex.classify_outcome(verdict, None) == ex.OUTCOME_FAIL
+
+    def test_blocked_true_is_blocked(self):
+        verdict = ex.parse_verdict(
+            _result_event({"passed": False, "error": "needs key", "blocked": True,
+                           "blocked_reason": "API key missing"})
+        )
+        assert ex.classify_outcome(verdict, None) == ex.OUTCOME_BLOCKED
+
+    def test_blocked_outranks_passed(self):
+        # A child that needs human help stops the run even if it also claimed to pass.
+        verdict = {"passed": True, "blocked": True, "blocked_reason": "needs auth"}
+        assert ex.classify_outcome(verdict, None) == ex.OUTCOME_BLOCKED
+
+    def test_passed_missing_is_fail(self):
+        assert ex.classify_outcome({"summary": "did stuff"}, None) == ex.OUTCOME_FAIL
+
+    @pytest.mark.parametrize("value", [1, "true", "yes", [True], {"v": True}, None])
+    def test_passed_non_bool_is_fail(self, value):
+        assert ex.classify_outcome({"passed": value}, None) == ex.OUTCOME_FAIL
+
+    # --- missing / malformed structured_output → None → fail ---
+
+    def test_structured_output_absent(self):
+        assert ex.parse_verdict(_result_event()) is None
+        assert ex.classify_outcome(ex.parse_verdict(_result_event()), None) == ex.OUTCOME_FAIL
+
+    def test_success_subtype_without_structured_output(self):
+        # D7: a `success` subtype that carries no verdict is still a failure, not a pass.
+        event = _result_event(subtype="success")
+        assert ex.parse_verdict(event) is None
+        assert ex.classify_outcome(ex.parse_verdict(event), None) == ex.OUTCOME_FAIL
+
+    def test_error_subtype_without_structured_output(self):
+        event = _result_event(subtype="error_max_turns")
+        assert ex.parse_verdict(event) is None
+        assert ex.classify_outcome(ex.parse_verdict(event), None) == ex.OUTCOME_FAIL
+
+    @pytest.mark.parametrize(
+        "malformed",
+        ['{"passed": true}', ["passed"], None, 42, True, ""],
+        ids=["json-string", "list", "null", "int", "bool", "empty-string"],
+    )
+    def test_structured_output_malformed(self, malformed):
+        event = _result_event(malformed)
+        assert ex.parse_verdict(event) is None
+        assert ex.classify_outcome(ex.parse_verdict(event), None) == ex.OUTCOME_FAIL
+
+    @pytest.mark.parametrize("event", [None, "result", [], 42, {"type": "assistant"}])
+    def test_parse_verdict_never_raises(self, event):
+        # Defensive parsing: an unexpected stream shape degrades to fail, never a traceback.
+        assert ex.parse_verdict(event) is None
+
+    def test_verdict_none_is_fail(self):
+        assert ex.classify_outcome(None, None) == ex.OUTCOME_FAIL
+
+    # --- kill_reason short-circuits everything ---
+
+    @pytest.mark.parametrize("kill_reason", ["timeout-idle", "timeout-wall"])
+    def test_kill_reason_with_passing_verdict_is_fail(self, kill_reason):
+        assert ex.classify_outcome({"passed": True}, kill_reason) == ex.OUTCOME_FAIL
+
+    def test_kill_reason_with_blocked_verdict_is_fail(self):
+        verdict = {"passed": False, "blocked": True, "blocked_reason": "needs auth"}
+        assert ex.classify_outcome(verdict, "timeout-idle") == ex.OUTCOME_FAIL
+
+    def test_kill_reason_without_verdict_is_fail(self):
+        assert ex.classify_outcome(None, "timeout-wall") == ex.OUTCOME_FAIL
+
+    # --- is_result_event ---
+
+    def test_detects_result_event(self):
+        assert ex.is_result_event({"type": "result", "subtype": "success"}) is True
+
+    @pytest.mark.parametrize(
+        "obj",
+        [{"type": "assistant"}, {"type": "system", "subtype": "init"}, {}, None, "result", []],
+    )
+    def test_rejects_non_result_events(self, obj):
+        assert ex.is_result_event(obj) is False
+
+    def test_lenient_about_the_key_name(self):
+        # The event schema is undocumented, so a `role`-keyed variant still counts.
+        assert ex.is_result_event({"role": "result"}) is True
+
+    # --- VERDICT_SCHEMA shape ---
+
+    def test_schema_fields_are_exactly_the_five(self):
+        assert set(ex.VERDICT_SCHEMA["properties"]) == {
+            "passed", "summary", "error", "blocked", "blocked_reason"
+        }
+
+    def test_schema_requires_passed(self):
+        assert ex.VERDICT_SCHEMA["required"] == ["passed"]
+
+    def test_schema_requires_error_when_passed_false(self):
+        rule = _conditional_for("passed", False)
+        assert rule is not None
+        assert "error" in rule["then"]["required"]
+        # The `if` must also require the key, or it matches verdicts that omit `passed`.
+        assert rule["if"]["required"] == ["passed"]
+
+    def test_schema_requires_blocked_reason_when_blocked_true(self):
+        rule = _conditional_for("blocked", True)
+        assert rule is not None
+        assert "blocked_reason" in rule["then"]["required"]
+        assert rule["if"]["required"] == ["blocked"]
+
+    def test_schema_is_json_serializable(self):
+        # It is handed to the CLI as `--json-schema`, so it must survive a round trip.
+        assert json.loads(json.dumps(ex.VERDICT_SCHEMA)) == ex.VERDICT_SCHEMA
