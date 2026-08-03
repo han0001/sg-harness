@@ -13,7 +13,10 @@
     {
       "step": 1,
       "name": "verdict-contract",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-03T14:20:04+0900",
+      "summary": "Added the pure verdict contract to execute.py (VERDICT_SCHEMA with if/then conditionals, OUTCOME_* constants, is_result_event/parse_verdict/classify_outcome) — no subprocess/threads/clock/IO, every malformed or absent input degrades to fail; 115 tests pass (72 existing + 43 new TestVerdictContract).",
+      "completed_at": "2026-08-03T14:23:51+0900"
     },
     {
       "step": 2,
