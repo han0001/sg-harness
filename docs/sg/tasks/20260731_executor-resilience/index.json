@@ -29,7 +29,10 @@
     {
       "step": 3,
       "name": "preflight",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-03T14:35:27+0900",
+      "summary": "Added the mandatory D9 preflight to execute.py (MIN_CLAUDE_VERSION=(2,1,216) tuple floor, REQUIRED_CLI_CAPABILITIES probed via injected `run`, actionable abort naming floor+remedy) and wired preflight_check() as the first action of StepExecutor.run() — before check_blockers/checkout/ensure_created_at; 168 tests pass (149 existing + 19 new TestPreflight/TestRunPreflightsFirst).",
+      "completed_at": "2026-08-03T14:40:08+0900"
     },
     {
       "step": 4,
