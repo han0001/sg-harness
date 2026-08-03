@@ -1,0 +1,11 @@
+{
+  "project": "sg-harness",
+  "task": "executor-resilience",
+  "steps": [
+    { "step": 0, "name": "state-store", "status": "pending" },
+    { "step": 1, "name": "verdict-contract", "status": "pending" },
+    { "step": 2, "name": "liveness-runner", "status": "pending" },
+    { "step": 3, "name": "preflight", "status": "pending" },
+    { "step": 4, "name": "contract-docs", "status": "pending" }
+  ]
+}
