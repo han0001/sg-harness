@@ -37,7 +37,10 @@
     {
       "step": 4,
       "name": "contract-docs",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-08-03T14:40:08+0900",
+      "summary": "Aligned the child-facing contract with D6: _build_preamble rule 5 now forbids editing index.json and routes reporting through the verdict (passed/error/blocked) while keeping the no-git rule (Invariant 2); sg-decompose-task's step template + owner table stop instructing index.json edits; README documents the 2.1.216 CLI floor and the SG_-prefixed timeout knobs (T_IDLE_SEC 720 / T_MAX_SEC 5400 / MAX_TURNS 50 / BASH_MAX_TIMEOUT_MS 480000); 168 tests pass.",
+      "completed_at": "2026-08-03T14:43:12+0900"
     }
   ],
   "created_at": "2026-08-03T14:11:05+0900"
