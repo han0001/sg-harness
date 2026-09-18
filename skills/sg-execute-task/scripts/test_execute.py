@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 import execute as ex
 import runtimes.base as base_runtime
+import runtimes.claude as claude_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +441,7 @@ class TestCommitStep:
 
 
 # ---------------------------------------------------------------------------
-# _invoke_claude — the spawn contract (Popen mocked, no real child)
+# Claude API compatibility and _invoke_claude spawn contract
 # ---------------------------------------------------------------------------
 
 VERDICT_OK = {"passed": True, "summary": "ui shipped"}
@@ -465,6 +466,49 @@ class _FakeProc:
         return self.returncode
 
 
+class TestClaudeApiCompatibleSchema:
+    def test_removes_only_unsupported_top_level_combinators(self):
+        schema = {
+            "type": "object",
+            "description": "verdict",
+            "additionalProperties": False,
+            "properties": {
+                "nested": {
+                    "oneOf": [{"required": ["a"]}],
+                    "allOf": [{"required": ["b"]}],
+                    "anyOf": [{"required": ["c"]}],
+                }
+            },
+            "required": ["nested"],
+            "oneOf": [{"required": ["a"]}],
+            "allOf": [{"required": ["b"]}],
+            "anyOf": [{"required": ["c"]}],
+        }
+
+        compatible = claude_runtime.api_compatible_schema(schema)
+
+        assert compatible == {
+            "type": "object",
+            "description": "verdict",
+            "additionalProperties": False,
+            "properties": {
+                "nested": {
+                    "oneOf": [{"required": ["a"]}],
+                    "allOf": [{"required": ["b"]}],
+                    "anyOf": [{"required": ["c"]}],
+                }
+            },
+            "required": ["nested"],
+        }
+
+    def test_does_not_mutate_the_shared_verdict_schema(self):
+        original = json.loads(json.dumps(ex.VERDICT_SCHEMA))
+
+        claude_runtime.api_compatible_schema(ex.VERDICT_SCHEMA)
+
+        assert ex.VERDICT_SCHEMA == original
+
+
 class TestInvokeClaude:
     def _invoke(self, executor, proc=None, preamble="PREAMBLE\n", attempt=1):
         with patch("subprocess.Popen", return_value=proc or _FakeProc(stdout=RESULT_LINE)) as popen:
@@ -479,10 +523,19 @@ class TestInvokeClaude:
         # stream-json is what makes the idle watchdog possible; --verbose is required with it.
         assert cmd[cmd.index("--output-format") + 1] == "stream-json"
         assert "--verbose" in cmd
-        assert json.loads(cmd[cmd.index("--json-schema") + 1]) == ex.VERDICT_SCHEMA
+        schema = json.loads(cmd[cmd.index("--json-schema") + 1])
+        assert set(schema) == {"type", "properties", "required"}
+        assert schema["type"] == ex.VERDICT_SCHEMA["type"]
+        assert schema["properties"] == ex.VERDICT_SCHEMA["properties"]
+        assert schema["required"] == ex.VERDICT_SCHEMA["required"]
         assert cmd[cmd.index("--max-turns") + 1] == str(ex.MAX_TURNS)
         assert "PREAMBLE" in cmd[-1]
         assert "Implement the UI" in cmd[-1]
+
+    def test_selects_sonnet_for_the_headless_child(self, executor):
+        _, popen = self._invoke(executor)
+        cmd = popen.call_args[0][0]
+        assert cmd[cmd.index("--model") + 1] == "sonnet"
 
     def test_child_gets_its_own_process_group_and_both_pipes(self, executor):
         _, popen = self._invoke(executor)
@@ -896,6 +949,13 @@ class TestVerdictContract:
         event = _result_event(malformed)
         assert ex.parse_verdict(event) is None
         assert ex.classify_outcome(ex.parse_verdict(event), None) == ex.OUTCOME_FAIL
+
+    def test_rejects_failed_verdict_without_error(self):
+        assert ex.parse_verdict(_result_event({"passed": False})) is None
+
+    def test_rejects_blocked_verdict_without_reason(self):
+        verdict = {"passed": False, "error": "needs user input", "blocked": True}
+        assert ex.parse_verdict(_result_event(verdict)) is None
 
     @pytest.mark.parametrize("event", [None, "result", [], 42, {"type": "assistant"}])
     def test_parse_verdict_never_raises(self, event):

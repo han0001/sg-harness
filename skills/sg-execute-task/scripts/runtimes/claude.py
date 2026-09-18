@@ -33,6 +33,15 @@ from .base import (
 MIN_CLAUDE_VERSION = (2, 1, 216)
 REQUIRED_CLI_CAPABILITIES = ("--json-schema", "--output-format", "stream-json")
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_API_UNSUPPORTED_TOP_LEVEL_KEYS = ("oneOf", "allOf", "anyOf")
+
+
+def api_compatible_schema(schema: dict) -> dict:
+    return {
+        key: value
+        for key, value in schema.items()
+        if key not in _API_UNSUPPORTED_TOP_LEVEL_KEYS
+    }
 
 
 def _parse_cli_version(text: str) -> Optional[tuple]:
@@ -134,8 +143,9 @@ class ClaudeRuntime:
     def run(self, prompt: str, cwd: str) -> AttemptResult:
         cmd = [
             "claude", "-p", "--dangerously-skip-permissions",
+            "--model", "sonnet",
             "--output-format", "stream-json", "--verbose",
-            "--json-schema", json.dumps(VERDICT_SCHEMA),
+            "--json-schema", json.dumps(api_compatible_schema(VERDICT_SCHEMA)),
             "--max-turns", str(MAX_TURNS),
             prompt,
         ]
