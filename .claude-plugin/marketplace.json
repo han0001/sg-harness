@@ -1,12 +1,12 @@
 {
   "name": "han0001-plugins",
-  "description": "han0001's collection of Claude Code plugins. Currently provides sg-harness (a design → decomposition → execution → knowledge-sync workflow).",
+  "description": "han0001's agent workflow plugins. Currently provides sg-harness for design, decomposition, execution, and knowledge sync.",
   "owner": { "name": "han0001" },
   "plugins": [
     {
       "name": "sg-harness",
       "source": ".",
-      "description": "A design (grill) → decomposition → sequential execution → knowledge-sync workflow harness."
+      "description": "A provider-neutral design → decomposition → sequential execution → knowledge-sync workflow harness."
     }
   ]
 }

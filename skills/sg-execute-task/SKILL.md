@@ -1,64 +1,69 @@
 ---
 name: sg-execute-task
-description: Execution stage of the sg-* workflow. Drives an isolated claude session per step sequentially via the bundled execute.py, over the task/step files produced by sg-decompose-task. Use when the steps are decomposed and ready to run, or when you need to "run the steps" / "execute the plan".
+description: Use when an sg-* task has been decomposed into step files and is ready for sequential execution.
 ---
 
-This skill is the **execution stage** of the sg-* workflow. It takes the task/step files produced by `/sg-decompose-task` (under `docs/sg/tasks/{yyyymmdd}_{task-name}/`) and uses the bundled `execute.py` to drive an isolated claude session per **step**, sequentially and with self-correction.
+# Execute a decomposed task
 
-> **Vocabulary** (see `CLAUDE.md` › Vocabulary for the canonical definitions): a **stage** is one skill; a **task** is one goal = one `plan.md`; a **step** is one decomposed, isolated unit of work. This stage runs the steps of a single task.
+This is the **execution stage** of the sg-* workflow. It runs the step files produced by `sg-decompose-task` sequentially, one isolated child-agent session per step, with retry and progress reporting.
 
-(Decomposition — splitting the plan into steps and writing the files — is handled by `/sg-decompose-task`. This skill only runs them.)
+The **host** is the agent running this skill. The **runtime** is the child-agent CLI selected with `--runtime`; they may be different providers.
 
----
+## Input
 
-## Workflow
+The current project must contain:
 
-### Input: the decomposed task
+- `docs/sg/tasks/index.json`, including this task's `dir` entry.
+- `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json`.
+- `docs/sg/tasks/{yyyymmdd}_{task-name}/step{N}.md` files.
 
-`/sg-decompose-task` must have already created, in the user's project (cwd):
+If they are missing, use `sg-decompose-task` first.
 
-- `docs/sg/tasks/index.json` — the top-level status index (with this task's `dir` entry).
-- `docs/sg/tasks/{yyyymmdd}_{task-name}/index.json` — the task detail (`task` name + `steps[]`).
-- `docs/sg/tasks/{yyyymmdd}_{task-name}/step{N}.md` — one self-contained file per step.
+## Before execution
 
-If these are missing, run `/sg-decompose-task` first.
+1. Confirm that the host is operating from the target project's git repository.
+2. Select the requested runtime: `claude` or `codex`. If the user did not specify one, ask them to choose before requesting safety approval. Do not infer it from the host and never switch runtimes after a failure.
+3. Use the source locator supplied by the host when it loaded this skill. For a filesystem-backed skill, take the directory containing this `SKILL.md` and append `scripts/execute.py`; verify that file exists before running it. If the host does not expose a usable bundled-resource locator, stop and report that packaging error instead of guessing from cwd or a provider-specific environment variable.
+4. Tell the user which runtime will run and obtain one explicit safety approval. The executor creates or checks out a feature branch and commits automatically. Claude children disable permission checks; Codex children run non-interactively with `workspace-write`. Pushing remains opt-in.
 
-### Execute
+## Execute
 
-Run the executor. **There is one reporting mode and you do not ask the user to choose it.** This session drives the run **automatically from the first pending step to the last** — it never pauses mid-run to ask "run the next step?". After each step finishes it emits a **one-line progress report** into this chat (`✓ Step N/M … — {summary}` + `Next ▶ …`), so the user watches progress live without lifting a finger. The run only stops on **error** or **blocked** (see Error recovery below).
-
-> **This skill (the current Claude session) runs it directly.** The bundled-script path variable `${CLAUDE_SKILL_DIR}` is only expanded in Claude's execution context (it is empty if the user types it into their own terminal). So tell the user what will run, get the **one** safety approval (it disables permission checks and auto-commits — see Safety below), and then invoke it via Bash.
-
-**This session drives the loop via `--once` — one step per call, not one call for the whole task.** (A single whole-task call cannot stream: Bash returns stdout only when the command exits, so every `✓ Step` line would arrive bunched up at the end instead of one-per-step.)
+Run one step per call so the host can relay progress after every step:
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once          # run the next pending step only
-python3 "${CLAUDE_SKILL_DIR}/scripts/execute.py" {yyyymmdd}_{task-name} --once --push    # ... on the FINAL step only, to push after it
+python3 "<directory containing the loaded SKILL.md>/scripts/execute.py" {yyyymmdd}_{task-name} --runtime {claude|codex} --once
+python3 "<directory containing the loaded SKILL.md>/scripts/execute.py" {yyyymmdd}_{task-name} --runtime {claude|codex} --once --push
 ```
 
-1. Run `execute.py {task-dir} --once`. It runs exactly one pending step and exits.
-2. Relay the `✓ Step N/M … — {summary}` and `Next ▶ …` lines it printed as a one-line progress report. **Do NOT read `step{N}-output.json`** (the child's full stdout — large and unnecessary); the printed summary is enough.
-3. If a `Next ▶` step remains and no error/blocked occurred, **repeat from 1 immediately without asking the user**. Keep going until it prints `All steps completed!`, then stop. (Add `--push` only on the final step's call.)
+Use `--push` only on the final call and only when the user requested a push.
 
-> **⚠ Safety.** For each step, execute.py spins up a child claude session with permission checks disabled (`--dangerously-skip-permissions`) and automatically branches/commits (and pushes if requested) to the current project's git repo. Always get user approval before running.
+1. Run the next pending step with `--once`.
+2. Relay the printed `✓ Step N/M … — {summary}` and `Next ▶ …` progress lines. Do not read `step{N}-output.json`; the printed summary is sufficient.
+3. If another step remains and the result is neither `error` nor `blocked`, repeat immediately without requesting another approval.
+4. Stop when the executor prints `All steps completed!`, or on `error`/`blocked`.
 
-**Target = the current project (cwd).** execute.py treats the **git root of cwd** — not its own install location — as the project root, reading `docs/sg/tasks/`, `CLAUDE.md`, and `docs/` and committing to that repo. So this session must be running at the user's project root, and the step files created by `/sg-decompose-task` must live there too.
+The target is always the **git root of cwd**, not the plugin installation directory.
 
-What execute.py handles automatically:
+## Executor contract
 
-- Creates/checks out the `feat-{task-name}` branch
-- Injects guardrails — includes CLAUDE.md + docs/*.md in every step prompt
-- Accumulates context — passes completed steps' summaries into the next step prompt
-- Self-correction — retries up to 3 times on failure, feeding the previous error back into the prompt
-- Two-stage commit — commits code changes (`feat`) and metadata (`chore`) separately
-- Records timestamps automatically
-- **Fail-Fast** — if the `dir` entry is missing from the top index, reports the desync via `WARN`
+`execute.py`:
 
-Error recovery:
+- creates or checks out `feat-{task-name}`;
+- loads project instructions with runtime-specific precedence (`CLAUDE.md` first for Claude, `AGENTS.md` first for Codex), plus top-level `docs/*.md`;
+- passes completed-step summaries into the next prompt;
+- retries failed attempts up to three times with the previous error;
+- records timestamps and normalized verdicts;
+- commits code and metadata separately;
+- pushes only with `--push`;
+- warns when task indexes are desynchronized.
 
-- **On error**: set the step's `status` back to `"pending"` in index.json, delete `error_message`, then re-run.
-- **On blocked**: resolve the `blocked_reason`, set `status` back to `"pending"`, delete `blocked_reason`, then re-run.
+Only the orchestrator may commit or push. Child sessions report their result through the verdict schema and must not edit `index.json`.
 
-### Next stage
+## Error recovery
 
-When the work is done and you are wrapping up the session, use `/sg-source-of-truth` to sync this task's decisions and changes back into the permanent docs (docs/*, CLAUDE.md).
+- **On error:** after fixing the cause, set the step `status` back to `"pending"`, remove `error_message`, and rerun.
+- **On blocked:** resolve `blocked_reason`, set `status` back to `"pending"`, remove `blocked_reason`, and rerun.
+
+## Next stage
+
+When execution is complete, use `sg-source-of-truth` to propose syncing the task's decisions into permanent docs and active project instruction files.

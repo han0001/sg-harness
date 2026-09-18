@@ -1,196 +1,180 @@
 # sg-harness
 
-> A Claude Code workflow harness that turns a large task into isolated, self-correcting steps — **design → decompose → execute → knowledge-sync**.
+> A Claude Code and Codex workflow harness for **design → decompose → execute → knowledge sync**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-Plugin-8A63D2.svg)](https://github.com/han0001/sg-harness)
+[![Claude Code + Codex](https://img.shields.io/badge/Claude%20Code%20%2B%20Codex-supported-5B5BD6.svg)](https://github.com/han0001/sg-harness)
 
----
+sg-harness turns a large task into small, self-contained steps and runs each step in a fresh child-agent session. The conversation host and child runtime are independent: you can use the skills from Claude Code or Codex and execute steps with either the Claude CLI or Codex CLI.
 
-## Why this exists
-
-When you hand a large task to a single Claude session, quality decays as the context fills up: earlier decisions get blurry, unrelated files pile into the window, and one bad turn can derail the rest of the run.
-
-sg-harness attacks that from a different angle. It **splits the work into small, self-contained steps and runs each one in its own fresh Claude session**, sequentially, with automatic retry-on-failure. Each step starts clean, sees only what it needs (the guardrail docs + a short summary of what previous steps produced), and commits its result before the next one begins.
-
-The result is a repeatable pipeline instead of one long, drifting conversation.
-
----
-
-## The workflow at a glance
-
-sg-harness is a **plugin that ships four skills**, one of which bundles an orchestrator script. You drive it stage by stage:
+## Workflow
 
 ```mermaid
 flowchart LR
-    A["/sg-plan<br/>design · grill-me"] -->|plan.md| B["/sg-decompose-task<br/>decompose"]
-    B -->|"step0.md … stepN.md"| C{{"/sg-execute-task<br/>execute.py orchestrator"}}
-    C -->|"isolated claude session<br/>per step (sequential)"| C
-    C -->|"commits to feat-task branch"| D["/sg-source-of-truth<br/>knowledge sync"]
-    D -->|"update docs/*, CLAUDE.md"| E(("done"))
+    A["sg-plan<br/>design interview"] -->|plan.md| B["sg-decompose-task<br/>step design"]
+    B -->|"step0.md … stepN.md"| C{{"sg-execute-task<br/>orchestrator"}}
+    C -->|"Claude or Codex child<br/>per step"| C
+    C -->|"commits to feat-task branch"| D["sg-source-of-truth<br/>knowledge sync"]
+    D -->|"approved doc updates"| E(("done"))
 ```
 
 | Stage | Skill | Input | Output |
-|-------|-------|-------|--------|
-| **1. Design** | `/sg-plan` | your intent + `docs/`, `CLAUDE.md` | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` |
-| **2. Decompose** | `/sg-decompose-task` | `plan.md` | `docs/sg/tasks/{yyyymmdd}_{task}/step*.md` |
-| **3. Execute** | `/sg-execute-task` | the `docs/sg/tasks/` step files | isolated `claude` session per step via `execute.py` → commits |
-| **4. Knowledge sync** | `/sg-source-of-truth` | `plan.md` + the git diff | reconciled `docs/*`, `CLAUDE.md` |
+|---|---|---|---|
+| Design | `sg-plan` | user intent + repository docs | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` |
+| Decompose | `sg-decompose-task` | approved `plan.md` | `docs/sg/tasks/{yyyymmdd}_{task}/step*.md` |
+| Execute | `sg-execute-task` | task index + step files | isolated child runs, normalized verdicts, commits |
+| Knowledge sync | `sg-source-of-truth` | plan + task-owned git changes | proposed permanent-doc updates |
 
-Each stage is independent — you can stop after design, review, and only then move on.
+The planning interview is self-contained: it reads the repository first, asks one dependency-ordered question at a time with a recommendation, and waits for explicit approval before creating the plan. No external GrillMe skill is required.
 
----
+## Host and runtime
+
+- **Host:** the Claude Code or Codex conversation that runs an SG skill.
+- **Runtime:** the CLI that performs an isolated implementation step.
+
+Choose the runtime explicitly with `--runtime claude` or `--runtime codex`. The CLI default remains `claude` for backward compatibility; the `sg-execute-task` skill asks when no choice was provided and never auto-falls back to another provider.
+
+| Runtime | Child command | Instruction precedence | Isolation / permissions |
+|---|---|---|---|
+| Claude | `claude -p` | `CLAUDE.md`, then `AGENTS.md` | permission checks disabled for the approved automated run |
+| Codex | `codex exec` | `AGENTS.md`, then `CLAUDE.md` | ephemeral, non-interactive, `workspace-write` sandbox |
+
+Only the first existing instruction file is injected, followed by top-level `docs/*.md`. Both runtimes must return the same JSON verdict schema before the common retry, state, and git flow accepts the result.
 
 ## How execution works
 
-The interesting part lives in `skills/sg-execute-task/scripts/execute.py`, the orchestrator that turns a folder of `step*.md` files into commits. For every pending step it:
+For each pending step, `skills/sg-execute-task/scripts/execute.py`:
 
-- **Spins up an isolated `claude -p` session** — one fresh session per step, so no cross-step context bleed.
-- **Injects the guardrails** — the target project's `CLAUDE.md` and `docs/*.md` are prepended to every step prompt, so each session obeys the same rules.
-- **Accumulates just enough context** — a one-line `summary` written on each step's completion is passed forward into the next step's prompt (not the whole transcript).
-- **Self-corrects** — on failure it retries up to **3 times**, feeding the previous error back into the prompt.
-- **Commits in two stages** — code changes as a `feat` commit, metadata/status as a separate `chore` commit, onto a dedicated `feat-{task}` branch.
-- **Reports progress live** — driven one step at a time (`--once`), it streams a `✓ Step N/M — {summary}` line into the chat after each step, and only stops on `error` or `blocked`.
+- runs one fresh child-agent process;
+- injects the selected project instructions and permanent docs;
+- passes only completed-step summaries forward, not whole transcripts;
+- validates the final verdict against one shared JSON Schema;
+- retries failures up to three times with the previous error;
+- commits code and state metadata separately on `feat-{task}`;
+- reports progress after every `--once` call;
+- pushes only when `--push` was explicitly requested.
 
-**Target = the git root of your current directory**, never the plugin's install location — so it always operates on the project you're standing in.
+The target is always the **git root of the current working directory**, never the plugin installation directory.
 
-### CLI version floor
+### Runtime preflight
 
-`execute.py` drives each child session with `--output-format stream-json` and `--json-schema`, and reads the step's pass/fail **verdict** out of the resulting structured output. An older CLI ignores an unknown `--json-schema` silently, so the failure mode would be a run that looks healthy while every step fails for a reason no log explains.
+Preflight runs before blocker checks, git operations, or state writes.
 
-To make that impossible, a **mandatory preflight** runs before any git or state mutation and aborts the run unless the local `claude` is at least:
+- Claude requires `claude >= 2.1.216` and verifies its structured-output and stream options.
+- Codex uses capability detection instead of a version floor. It requires an authenticated CLI and `codex exec` support for `--json`, `--ephemeral`, `--sandbox`, `--output-schema`, and `--output-last-message`.
 
-```text
-claude >= 2.1.216
-```
+### Timeout controls
 
-The preflight also checks that `claude --help` advertises `--json-schema`, `--output-format`, and `stream-json`. It is deliberately not opt-out — a `--skip-preflight` flag would just make the silent-misbehaviour mode reachable again.
+| Layer | Environment override | Default | Purpose |
+|---|---|---:|---|
+| Idle | `SG_T_IDLE_SEC` | 720 seconds | maximum gap between child events |
+| Wall clock | `SG_T_MAX_SEC` | 5400 seconds | maximum duration of one attempt |
+| Turns | `SG_MAX_TURNS` | 50 | Claude child tool-loop bound |
+| Child Bash | `SG_BASH_MAX_TIMEOUT_MS` | 480000 ms | Claude child Bash timeout |
 
-### Timeout knobs
-
-A hung step is bounded in three layers rather than by one blunt wall-clock — an idle watchdog detects a hang fast, the wall-clock is only a backstop, and `--max-turns` catches a session that keeps emitting but loops forever. All three route into the same retry-then-`error` path.
-
-| Layer | Constant | Env override | Default | What it bounds |
-|-------|----------|--------------|---------|----------------|
-| ① idle | `T_IDLE_SEC` | `SG_T_IDLE_SEC` | `720` (12 min) | gap between two events on the child's stream — the primary hang detector |
-| ② wall-clock | `T_MAX_SEC` | `SG_T_MAX_SEC` | `5400` (90 min) | total time for one attempt — the backstop ceiling |
-| ③ turns | `MAX_TURNS` | `SG_MAX_TURNS` | `50` | the child's tool-loop count, passed as `--max-turns` |
-| (input to ①) | `BASH_MAX_TIMEOUT_MS` | `SG_BASH_MAX_TIMEOUT_MS` | `480000` (8 min) | the child's own Bash timeout, set on its environment |
-
-All four are integer environment overrides read at import time; a non-integer value logs a `WARN` and falls back to the default.
-
-`BASH_MAX_TIMEOUT_MS` is what makes `T_IDLE_SEC` safe to size: by capping the child's longest single Bash call ourselves, "maximum legitimate silence" becomes a value we *control* rather than one we guess, and the idle timeout sits above it with margin. If you raise it, raise `T_IDLE_SEC` to match.
-
-> Note the `SG_` prefix on the overrides. `BASH_MAX_TIMEOUT_MS` (no prefix) is the variable `execute.py` **sets on the child**; `SG_BASH_MAX_TIMEOUT_MS` is how **you** configure it.
-
----
+Invalid integer overrides produce a warning and use the default.
 
 ## Install
 
-sg-harness is distributed as a Claude Code plugin from a single-plugin marketplace.
+### Claude Code plugin
 
 ```text
-# 1. Add this repo as a plugin marketplace
 /plugin marketplace add han0001/sg-harness
-
-# 2. Install the plugin from it
 /plugin install sg-harness@han0001-plugins
 ```
 
-The `skills/` and `hooks/` directories are auto-discovered from the plugin root — nothing else to wire up. (You can also browse and install interactively via the `/plugin` menu.)
+Claude discovers `skills/` and `hooks/` from the plugin root.
 
----
+### Codex local skill test
+
+For local authoring, clone the repository and symlink its four skill directories into Codex's user skill directory:
+
+```bash
+git clone https://github.com/han0001/sg-harness "$HOME/plugins/sg-harness"
+mkdir -p "$HOME/.agents/skills"
+for sg_skill_path in "$HOME/plugins/sg-harness"/skills/sg-*; do
+  ln -s "$sg_skill_path" "$HOME/.agents/skills/$(basename "$sg_skill_path")"
+done
+```
+
+Codex supports symlinked local skills. Restart Codex if they do not appear. This path exercises the skills and bundled executor but not plugin-level hook installation.
+
+### Codex full-plugin local test
+
+Codex uses a local marketplace for full plugin testing. Clone the repository, then invoke `$plugin-creator` in Codex and ask it to register the existing checkout in your **personal marketplace without changing the plugin source**. Install using the marketplace name it reports:
+
+```bash
+codex plugin add sg-harness@<marketplace-name>
+```
+
+The personal marketplace is user-level state. This repository intentionally does not contain or modify `.agents/plugins/marketplace.json`. Public-directory submission is also outside the current scope.
 
 ## Quick start
 
-Run the stages in order from inside a **git repository** (the harness refuses to run otherwise):
+Run the stages from the root of the target git repository.
+
+In Claude Code, invoke the installed skills as slash commands:
 
 ```text
-/sg-plan             # interview + write docs/sg/plan/{date}_{task}/plan.md — no code yet
-/sg-decompose-task   # split plan.md into steps under docs/sg/tasks/{date}_{task}/
-/sg-execute-task     # after your approval, execute those steps one by one
-/sg-source-of-truth  # fold the decisions back into docs/ and CLAUDE.md
+/sg-plan
+/sg-decompose-task
+/sg-execute-task
+/sg-source-of-truth
 ```
 
-A typical run:
+In Codex CLI or the IDE extension, type `$` and select each installed SG skill, or let Codex invoke it from the task description. Tell `sg-execute-task` which child runtime to use, for example: “Execute this SG task with runtime codex.”
 
-1. **`/sg-plan`** grills you one decision at a time and writes a `plan.md`. It never implements.
-2. **`/sg-decompose-task`** drafts a step breakdown for your review and creates the `step*.md` files. It does not run anything.
-3. **`/sg-execute-task`** — after a **single safety approval** — runs `execute.py` step by step, committing as it goes.
-4. **`/sg-source-of-truth`** harvests what actually changed (plan + git diff) and proposes doc edits for you to approve.
+From a repository checkout, the executor can also be called directly:
 
----
+```bash
+python3 skills/sg-execute-task/scripts/execute.py 20260830_example --runtime claude --once
+python3 skills/sg-execute-task/scripts/execute.py 20260830_example --runtime codex --once
+```
+
+Use `--push` only on the final call and only when a push is intended.
+
+## Safety
+
+- The host obtains one explicit approval before execution because the orchestrator creates/checks out a branch and commits automatically.
+- Claude children use disabled permission checks only inside that approved run. Codex children use `workspace-write` and cannot request a new interactive approval.
+- Only `execute.py` may branch, commit, or push. Child agents are told not to run git operations or edit task indexes.
+- `hooks/hooks.json` blocks `rm -rf`, `git push --force`, `git reset --hard`, and `DROP TABLE` for supported `PreToolUse` Bash hooks. The core workflow does not depend on the hook being installed.
+- A live smoke test runs child agents and changes a git repository, so it should be performed only with separate explicit approval.
 
 ## Repository layout
 
 ```text
 sg-harness/
 ├── skills/
-│   ├── sg-plan/SKILL.md               # design stage (grill-me → plan.md)
-│   ├── sg-decompose-task/SKILL.md     # decompose stage (plan.md → docs/sg/tasks/step*.md)
+│   ├── sg-plan/SKILL.md
+│   ├── sg-decompose-task/SKILL.md
 │   ├── sg-execute-task/
-│   │   ├── SKILL.md                   # execute stage
+│   │   ├── SKILL.md
 │   │   └── scripts/
-│   │       ├── execute.py             # the orchestrator (isolated session per step)
-│   │       └── test_execute.py        # its tests
-│   └── sg-source-of-truth/SKILL.md    # knowledge-sync stage
-├── hooks/hooks.json                   # PreToolUse Bash safety guard
-├── .claude-plugin/
-│   ├── plugin.json                    # plugin manifest
-│   └── marketplace.json               # single-plugin marketplace
-├── CLAUDE.md                          # project memory (for developing sg-harness itself)
-├── LICENSE
+│   │       ├── execute.py
+│   │       ├── runtimes/{base,claude,codex}.py
+│   │       ├── schemas/verdict.schema.json
+│   │       └── test_execute.py
+│   └── sg-source-of-truth/SKILL.md
+├── hooks/{hooks.json,test_hooks.py}
+├── .claude-plugin/{plugin.json,marketplace.json}
+├── .codex-plugin/plugin.json
+├── AGENTS.md
+├── CLAUDE.md
 └── README.md
 ```
 
----
-
-## Safety
-
-Running code-writing sessions automatically is powerful, so the harness layers on guardrails:
-
-- **A hook blocks dangerous commands.** `hooks/hooks.json` is a `PreToolUse` guard that refuses any Bash call matching `rm -rf`, `git push --force`, `git reset --hard`, or `DROP TABLE`.
-- **Skip-permissions is gated.** `execute.py` runs each child session with `--dangerously-skip-permissions` and auto-commits — so it always asks for **one explicit approval** before the run starts, telling you exactly what it will do.
-- **Only the orchestrator touches git.** Child sessions are forbidden from committing or pushing; branching/committing is done solely by `execute.py`. Pushing is opt-in via `--push`.
-
----
-
-## Invariants & non-goals
-
-**Invariants** (contracts that must always hold):
-
-- Target is the **git root of cwd**, not the plugin's install path.
-- **Only `execute.py` touches git.**
-- **Step files are self-contained** — no references to an earlier conversation.
-- Naming: top index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded).
-- **Refuses to run outside a git repo.**
-
-**Non-goals** (deliberately out of scope):
-
-- No parallel step execution / no per-step worktrees — steps run **sequentially**.
-- No deploy — the most it does is an opt-in `git push` to a `feat-*` branch.
-- No multi-user / concurrency handling.
-
----
-
 ## Development
 
-Run the orchestrator's test suite:
-
 ```bash
-.venv/bin/python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
+python3 -m pytest skills/sg-execute-task/scripts/test_execute.py hooks/test_hooks.py -q
+python3 skills/sg-execute-task/scripts/execute.py --help
+python3 /path/to/plugin-creator/scripts/validate_plugin.py .
 ```
 
-### Continuous integration
+CI runs the executor/runtime contract tests, both host hook fixtures, and manifest identity checks. See [`CLAUDE.md`](./CLAUDE.md) for repository invariants.
 
-Two GitHub Actions run on every pull request:
-
-- **`pytest`** (`.github/workflows/test.yml`) — runs the `execute.py` test suite.
-- **`review`** (`.github/workflows/ai-review-gate.yml`) — Claude reviews the diff and posts a single `RISK: LOW | HIGH` verdict comment. Review-only: it has no merge authority.
-
-See [`CLAUDE.md`](./CLAUDE.md) for the full development guide (purpose, invariants, and working discipline for hacking on the harness itself).
-
----
+Codex packaging and local skill behavior follow the [official build-plugins](https://learn.chatgpt.com/docs/build-plugins) and [build-skills](https://learn.chatgpt.com/docs/build-skills) guidance.
 
 ## License
 

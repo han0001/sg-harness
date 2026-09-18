@@ -14,4 +14,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install pytest
-      - run: python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
+      - run: python -m pytest skills/sg-execute-task/scripts/test_execute.py hooks/test_hooks.py -q

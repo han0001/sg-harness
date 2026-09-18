@@ -1,40 +1,42 @@
 ---
 name: sg-plan
-description: Design stage of the sg-* workflow. Uses grill-me to resolve the decision tree one branch at a time and writes the result out to a plan.md plan document. Use when designing a new feature, when the user says "let's design first" / "let's make a plan", or when you want to clarify intent before implementing.
+description: Use when designing a feature, clarifying intent before implementation, or turning an initial request into an approved plan.md.
 ---
 
-This skill is the **design stage** of the sg-* workflow. It uses grill-me to resolve the decision tree and writes the result out to a plan document.
+# Plan a task
 
-**It does not implement.** The only output is a single `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` file. (No state file is created — pipeline stages are inferred from file existence.)
+This is the **design stage** of the sg-* workflow. It resolves the decision tree with the user and writes one `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` file.
 
----
+**Do not implement.** Do not create task state or step files in this stage.
 
 ## Workflow
 
-### A. Explore
+### A. Explore first
 
-Read the documents under `/docs/` (PRD, ARCHITECTURE, ADR, etc.) and `CLAUDE.md` to understand the product, architecture, and design intent. For questions the codebase can answer, explore directly using Explore agents in parallel.
+Read the repository and the permanent documentation relevant to the requested design before asking questions. Read the active project instruction files when present (`AGENTS.md`, `CLAUDE.md`, or both), following the current host's precedence rules.
 
-### B. Interview (grill-me)
+Answer codebase questions by inspecting the repository. Read-only exploration subagents are optional when the host supports them and parallel exploration is useful; otherwise explore directly. Keep the design interview in the main conversation.
 
-Use the `/grill-me` skill to interrogate the user through the decision tree **one branch at a time**.
+### B. Interview
 
-- Present a **recommended answer** alongside each question.
-- Resolve decisions in dependency order, dependencies first.
-- For questions you can answer by reading the codebase, **explore directly** instead of asking the user.
+Resolve the design with the user using this contract:
 
-The goal is to clarify design intent enough that the next stage (`/sg-decompose-task`) can decompose the work — without implementing anything.
+1. Ask only decisions that the repository and docs cannot answer.
+2. Resolve dependencies first so later choices build on earlier ones.
+3. Ask one question at a time and include a recommended answer with its reason.
+4. Record each choice, reason, and trade-off for the decision log.
+5. Present the resulting design, then ask for direct confirmation such as “Approve this design and create `plan.md`?” Do not treat a prior answer or silence as approval.
+
+The interview may use a host-provided questioning skill when available, but this contract is self-contained and remains authoritative.
 
 ### C. Generate the plan
 
-Once you reach agreement, get user approval and create `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md`.
+After approval, create `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md`.
 
-- `{yyyymmdd}`: today's date (e.g. `20260616`).
-- `{task-name}`: a kebab-case slug (e.g. `csv-import`). Capture the core task in one or two words.
+- `{yyyymmdd}`: today's date, for example `20260616`.
+- `{task-name}`: a one- or two-word kebab-case slug, for example `csv-import`.
 
-**Naming contract (important):** the `{yyyymmdd}_{task-name}` folder name chosen here is reused verbatim by `/sg-decompose-task` when it creates `docs/sg/tasks/{yyyymmdd}_{task-name}/` under the **same name**, making it the **mapping key**. Choose the task name carefully.
-
-#### plan.md structure
+The folder name is the mapping key for the next stage. The `sg-decompose-task` skill must reuse `{yyyymmdd}_{task-name}` verbatim under `docs/sg/tasks/`.
 
 ```markdown
 ---
@@ -53,15 +55,15 @@ task_dir: {yyyymmdd}_{task-name}
 {Core structure and data flow. Diagrams if needed.}
 
 ## 3. Decisions
-{Decisions agreed via grill-me. Table or list.}
+{Decisions approved during the interview.}
 
 ## 4. Open Questions
-{Items to settle at implementation time + a default/recommendation for each.}
+{Items deferred to implementation, with a default or recommendation for each.}
 
 ## 5. Decision Log
-{The "why" behind each decision — choice / reason / trade-off.}
+{Each choice, its reason, and its trade-off.}
 ```
 
 ### Next stage
 
-Once the plan exists, move on to `/sg-decompose-task` to decompose this plan.md into steps.
+Once the plan exists, use `sg-decompose-task` to turn it into executable steps.

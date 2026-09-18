@@ -1,13 +1,13 @@
 ---
 name: sg-decompose-task
-description: Decomposition stage of the sg-* workflow. Splits a plan.md plan into self-contained, executable steps and writes the task/step files that sg-execute-task later runs. Use when moving a design into an execution plan, or when you need "task breakdown" / "split into steps".
+description: Use when an approved plan.md must be split into self-contained, executable steps for the sg-* workflow.
 ---
 
-This skill is the **decomposition stage** of the sg-* workflow. It takes the plan (`plan.md`) produced by `/sg-plan` as input, splits it into executable **steps**, and writes the task/step files under `docs/sg/tasks/`. It does **not** run anything — execution is the next stage (`/sg-execute-task`).
+This skill is the **decomposition stage** of the sg-* workflow. It takes the plan (`plan.md`) produced by `sg-plan` as input, splits it into executable **steps**, and writes the task/step files under `docs/sg/tasks/`. It does **not** run anything — execution is the next stage (`sg-execute-task`).
 
-> **Vocabulary** (see `CLAUDE.md` › Vocabulary for the canonical definitions): a **stage** is one skill; a **phase** is an ordered step inside this skill (A, B, C below); a **task** is one goal = one `plan.md`; a **step** is one decomposed, isolated unit of work that `sg-execute-task` runs.
+> **Vocabulary:** a **stage** is one skill; a **phase** is an ordered part of this skill (A, B, C below); a **task** is one goal represented by one `plan.md`; a **step** is one decomposed, isolated unit of work that `sg-execute-task` runs.
 
-(Exploration, discussion, and design are handled by `/sg-plan`. Running the steps is handled by `/sg-execute-task`.)
+(Exploration, discussion, and design are handled by `sg-plan`. Running the steps is handled by `sg-execute-task`.)
 
 ---
 
@@ -18,9 +18,9 @@ This skill is the **decomposition stage** of the sg-* workflow. It takes the pla
 Read `docs/sg/plan/{yyyymmdd}_{task-name}/plan.md` to understand the design intent and decisions.
 
 - If plan.md **exists**: use its decisions as the basis for decomposition.
-- If plan.md is **missing**: warn that "running `/sg-plan` first is recommended", then, if the user wants to proceed, explore `/docs/` directly and decompose (backward compatibility).
+- If plan.md is **missing**: warn that "running `sg-plan` first is recommended", then, if the user wants to proceed, explore `docs/` directly and decompose (backward compatibility).
 
-Also read `/docs/` (ARCHITECTURE, ADR, etc.) and `CLAUDE.md` to confirm the architecture, tech stack, and CRITICAL rules.
+Also read relevant files under `docs/` and the active project instruction files (`AGENTS.md`, `CLAUDE.md`, or both according to the current host's precedence rules) to confirm the architecture, tech stack, and critical rules.
 
 ### Phase B — Step design
 
@@ -38,7 +38,7 @@ Lazy about *structure*, never about the *contract*: still specify each step's in
 Design principles:
 
 1. **Minimize scope** — each step touches only one layer or module. If multiple modules must change at once, split the step.
-2. **Self-containment** — each step file runs in an independent Claude session. External references like "as discussed in the earlier conversation" are forbidden. **Write the relevant decisions from plan.md directly into the step file** (execute.py does not inject plan.md).
+2. **Self-containment** — each step file runs in an independent child-agent session. External references like "as discussed in the earlier conversation" are forbidden. **Write the relevant decisions from plan.md directly into the step file** (`execute.py` does not inject plan.md).
 3. **Force the prep work** — list the relevant doc paths and the paths of files created/modified in earlier steps.
 4. **Signature-level instructions** — specify only the interface of functions/classes and leave the internal implementation to the agent's discretion. However, always spell out the core rules that must not drift from the design intent (idempotency, security, data integrity, etc.).
 5. **AC must be runnable commands** — not abstract prose like "X should work", but actual runnable verification commands such as `npm run build && npm test`.
@@ -82,7 +82,7 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 }
 ```
 
-- `project`: the project name (see CLAUDE.md).
+- `project`: use the name from permanent docs first, then standard project metadata, then the git-root directory name.
 - `task`: **task name only** (date excluded). It is the basis for the branch name `feat-{task-name}`.
 - `steps[].step`: a 0-based sequence number.
 - `steps[].name`: a kebab-case slug.
@@ -107,8 +107,8 @@ Fields recorded automatically on state transitions:
 
 First read the files below to understand the architecture and design intent:
 
-- `/docs/ARCHITECTURE.md`
-- `/docs/ADR.md`
+- `docs/ARCHITECTURE.md`
+- `docs/ADR.md`
 - {paths of files created/modified in earlier steps}
 
 ## Task
@@ -121,8 +121,8 @@ However, clearly nail down the core rules that must not drift from the design in
 ## Acceptance Criteria
 
 ```bash
-npm run build   # no compile errors
-npm test        # tests pass
+<project-specific build or static-check command>
+<project-specific test command>
 ```
 
 ## Verification procedure
@@ -131,9 +131,12 @@ npm test        # tests pass
 2. Check the architecture checklist:
    - Does it follow the ARCHITECTURE.md directory structure?
    - Does it stay within the ADR tech stack?
-   - Does it violate any CLAUDE.md CRITICAL rule?
-3. Report the result through the verdict you return, not by editing files. execute.py is the
-   **sole writer** of `index.json` — it records this step's status from your verdict.
+   - Does it violate any active project instruction?
+3. Report the result through the verdict schema supplied by the executor, not by editing files:
+   - completed: `{"passed": true, "summary": "one-line summary"}`
+   - error: `{"passed": false, "error": "actionable failure"}`
+   - blocked: `{"passed": false, "error": "blocked", "blocked": true, "blocked_reason": "required user or external action"}`
+   `execute.py` is the **sole writer** of `index.json`; it validates this verdict and records the step status.
 
 ## Prohibited
 
@@ -143,4 +146,4 @@ npm test        # tests pass
 
 ### Next stage
 
-Once the step files are created and approved, move on to `/sg-execute-task` to run them.
+Once the step files are created and approved, use `sg-execute-task` to run them.

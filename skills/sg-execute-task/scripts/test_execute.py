@@ -4,6 +4,7 @@ Verify that behavior is identical before and after refactoring.
 """
 
 import io
+import importlib
 import json
 import os
 import signal
@@ -19,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import execute as ex
+import runtimes.base as base_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +528,32 @@ class TestInvokeClaude:
             self._invoke(executor)
         assert mock_run.call_count == 0
 
+    def test_restores_task_index_after_child_tampering(self, executor):
+        original = executor._index_file.read_bytes()
+
+        def tamper(prompt, cwd):
+            executor._index_file.write_text('{"child": "owned"}')
+            return _attempt(ex.OUTCOME_FAIL, verdict={"passed": False, "error": "AC failed"})
+
+        executor._runtime = MagicMock(run=tamper)
+
+        executor._invoke_runtime({"step": 2, "name": "ui"}, "preamble")
+
+        assert executor._index_file.read_bytes() == original
+
+    def test_restores_top_index_after_child_tampering(self, executor, top_index):
+        original = top_index.read_bytes()
+
+        def tamper(prompt, cwd):
+            top_index.write_text('{"child": "owned"}')
+            return _attempt(ex.OUTCOME_FAIL, verdict={"passed": False, "error": "AC failed"})
+
+        executor._runtime = MagicMock(run=tamper)
+
+        executor._invoke_runtime({"step": 2, "name": "ui"}, "preamble")
+
+        assert top_index.read_bytes() == original
+
 
 # ---------------------------------------------------------------------------
 # progress_indicator (formerly Spinner)
@@ -550,6 +578,12 @@ class TestProgressIndicator:
 # ---------------------------------------------------------------------------
 
 class TestMainCli:
+    def test_runtime_defaults_to_claude_and_accepts_codex(self):
+        parser = ex.build_parser()
+
+        assert parser.parse_args(["task-dir"]).runtime == "claude"
+        assert parser.parse_args(["task-dir", "--runtime", "codex"]).runtime == "codex"
+
     def test_no_args_exits(self):
         with patch("sys.argv", ["execute.py"]):
             with pytest.raises(SystemExit) as exc_info:
@@ -1039,7 +1073,7 @@ class TestRetryRouting:
             preambles.append(preamble)
             return queued.pop(0)
 
-        executor._invoke_claude = fake_invoke
+        executor._invoke_runtime = fake_invoke
         executor._commit_step = lambda num, name: executor._commits.append((num, name))
         return preambles
 
@@ -1125,7 +1159,7 @@ class TestRetryRouting:
             executor._index_file.write_text(json.dumps(data))
             return _attempt(ex.OUTCOME_FAIL, verdict={"passed": False, "error": "AC failed"})
 
-        executor._invoke_claude = fake_invoke
+        executor._invoke_runtime = fake_invoke
         executor._commit_step = lambda num, name: None
 
         with pytest.raises(SystemExit) as exc_info:
@@ -1153,13 +1187,39 @@ def _run_child(cmd, tmp_path):
 @pytest.fixture
 def fast_bounds(monkeypatch):
     """Shrink the layered bound to test scale; the decision logic itself is unchanged."""
-    monkeypatch.setattr(ex, "T_IDLE_SEC", 0.3)
-    monkeypatch.setattr(ex, "T_MAX_SEC", 30.0)
-    monkeypatch.setattr(ex, "KILL_GRACE_SEC", 0.4)
-    monkeypatch.setattr(ex, "READER_JOIN_SEC", 3.0)
+    monkeypatch.setattr(base_runtime, "T_IDLE_SEC", 0.3)
+    monkeypatch.setattr(base_runtime, "T_MAX_SEC", 30.0)
+    monkeypatch.setattr(base_runtime, "KILL_GRACE_SEC", 0.4)
+    monkeypatch.setattr(base_runtime, "READER_JOIN_SEC", 3.0)
 
 
 class TestRunChildIntegration:
+    def test_a_nonzero_exit_cannot_be_overridden_by_a_passing_verdict(self, tmp_path, fast_bounds):
+        cmd = _fake_child(tmp_path, "nonzero.py", '''
+            import json, sys
+            print(json.dumps({"type": "result", "subtype": "success",
+                              "structured_output": {"passed": True, "summary": "stale"}}), flush=True)
+            sys.exit(3)
+        ''')
+
+        result = _run_child(cmd, tmp_path)
+
+        assert result.return_code == 3
+        assert result.outcome == ex.OUTCOME_FAIL
+
+    def test_a_schema_invalid_structured_output_is_not_a_usable_verdict(self, tmp_path, fast_bounds):
+        cmd = _fake_child(tmp_path, "invalid-verdict.py", '''
+            import json
+            print(json.dumps({"type": "result", "subtype": "success",
+                              "structured_output": {"summary": "missing passed"}}), flush=True)
+        ''')
+
+        result = _run_child(cmd, tmp_path)
+
+        assert result.outcome == ex.OUTCOME_FAIL
+        assert result.verdict is None
+        assert result.saw_result_with_structured_output is False
+
     def test_a_stalled_child_is_idle_killed(self, tmp_path, fast_bounds):
         cmd = _fake_child(tmp_path, "stall.py", '''
             import json, time
@@ -1190,9 +1250,9 @@ class TestRunChildIntegration:
         assert result.saw_result_with_structured_output is True
 
     def test_the_wall_clock_backstop_kills_an_endlessly_chatty_child(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(ex, "T_IDLE_SEC", 30.0)   # never idle...
-        monkeypatch.setattr(ex, "T_MAX_SEC", 0.4)     # ...but out of total budget
-        monkeypatch.setattr(ex, "KILL_GRACE_SEC", 0.4)
+        monkeypatch.setattr(base_runtime, "T_IDLE_SEC", 30.0)   # never idle...
+        monkeypatch.setattr(base_runtime, "T_MAX_SEC", 0.4)     # ...but out of total budget
+        monkeypatch.setattr(base_runtime, "KILL_GRACE_SEC", 0.4)
         cmd = _fake_child(tmp_path, "chatty.py", '''
             import json, time
             while True:
@@ -1347,7 +1407,7 @@ class TestRunPreflightsFirst:
     def test_preflight_runs_before_blockers_checkout_and_state(self, executor, tmp_project):
         order = []
         with patch.object(ex, "ROOT", tmp_project), \
-             patch.object(ex, "preflight_check", side_effect=lambda: order.append("preflight")), \
+             patch.object(executor._runtime, "preflight", side_effect=lambda: order.append("preflight")), \
              patch.object(executor._state, "check_blockers", side_effect=lambda: order.append("blockers")), \
              patch.object(executor, "_checkout_branch", side_effect=lambda: order.append("checkout")), \
              patch.object(executor._state, "ensure_created_at", side_effect=lambda: order.append("created_at")), \
@@ -1357,7 +1417,7 @@ class TestRunPreflightsFirst:
 
     def test_a_failing_preflight_leaves_git_and_index_untouched(self, executor):
         before = executor._index_file.read_text()
-        with patch.object(ex, "preflight_check", side_effect=SystemExit(1)), \
+        with patch.object(executor._runtime, "preflight", side_effect=SystemExit(1)), \
              patch.object(executor, "_checkout_branch") as checkout, \
              patch.object(executor, "_run_git") as git, \
              patch.object(executor, "_execute_all_steps") as steps:
@@ -1366,3 +1426,260 @@ class TestRunPreflightsFirst:
         assert exc_info.value.code == 1
         assert checkout.call_count == 0 and git.call_count == 0 and steps.call_count == 0
         assert executor._index_file.read_text() == before   # created_at was never stamped
+
+
+class TestRuntimeBoundary:
+    def test_default_factory_returns_the_claude_runtime(self):
+        runtimes = importlib.import_module("runtimes")
+
+        default_runtime = runtimes.get_runtime()
+        named_runtime = runtimes.get_runtime("claude")
+        codex_runtime = runtimes.get_runtime("codex")
+
+        assert isinstance(default_runtime, runtimes.ClaudeRuntime)
+        assert isinstance(named_runtime, runtimes.ClaudeRuntime)
+        assert default_runtime.name == "claude"
+        assert default_runtime.instruction_files == ("CLAUDE.md", "AGENTS.md")
+        assert isinstance(codex_runtime, runtimes.CodexRuntime)
+        assert codex_runtime.instruction_files == ("AGENTS.md", "CLAUDE.md")
+
+    def test_executor_preflights_the_selected_runtime(self, tmp_project, task_dir):
+        events = []
+
+        class RecordingRuntime:
+            name = "recording"
+            instruction_files = ("AGENTS.md", "CLAUDE.md")
+
+            def preflight(self):
+                events.append("runtime-preflight")
+
+        with patch.object(ex, "ROOT", tmp_project):
+            executor = ex.StepExecutor("0-mvp", runtime=RecordingRuntime())
+
+        executor._print_header = lambda: None
+        executor._state.check_blockers = lambda: events.append("blockers")
+        executor._checkout_branch = lambda: events.append("checkout")
+        executor._load_guardrails = lambda: ""
+        executor._state.ensure_created_at = lambda: events.append("created_at")
+        executor._execute_all_steps = lambda guardrails, once=False: False
+
+        executor.run()
+
+        assert events == ["runtime-preflight", "blockers", "checkout", "created_at"]
+
+    def test_executor_delegates_attempts_to_the_selected_runtime(self, tmp_project, task_dir):
+        calls = []
+
+        class RecordingRuntime:
+            name = "recording"
+            instruction_files = ("AGENTS.md", "CLAUDE.md")
+
+            def preflight(self):
+                pass
+
+            def run(self, prompt, cwd):
+                calls.append((prompt, cwd))
+                return ex.AttemptResult(
+                    outcome=ex.OUTCOME_COMPLETED,
+                    verdict={"passed": True, "summary": "done"},
+                    kill_reason=None,
+                    signal=None,
+                    elapsed=0.1,
+                    last_activity_age=0.0,
+                    return_code=0,
+                    stderr_tail="",
+                    stdout_tail="",
+                    saw_result_with_structured_output=True,
+                    runtime="recording",
+                )
+
+        runtime = RecordingRuntime()
+        with patch.object(ex, "ROOT", tmp_project):
+            executor = ex.StepExecutor("0-mvp", runtime=runtime)
+
+        result = executor._invoke_runtime({"step": 2, "name": "ui"}, "PREAMBLE\n", attempt=2)
+
+        assert result.runtime == "recording"
+        assert calls == [("PREAMBLE\n# Step 2: UI\n\nImplement the UI.", str(tmp_project))]
+        output = json.loads((task_dir / "step2-output.json").read_text())
+        assert output["runtime"] == "recording"
+
+    def test_claude_guardrails_fall_back_to_agents_md(self, executor, tmp_project):
+        (tmp_project / "CLAUDE.md").unlink()
+        (tmp_project / "AGENTS.md").write_text("# Shared rules\n- use tests")
+
+        with patch.object(ex, "ROOT", tmp_project):
+            guardrails = executor._load_guardrails()
+
+        assert "## Project rules (AGENTS.md)" in guardrails
+        assert "use tests" in guardrails
+
+    def test_codex_guardrails_prefer_agents_md(self, tmp_project, task_dir):
+        (tmp_project / "AGENTS.md").write_text("# Codex-first rules")
+        runtimes = importlib.import_module("runtimes")
+        with patch.object(ex, "ROOT", tmp_project):
+            executor = ex.StepExecutor("0-mvp", runtime=runtimes.get_runtime("codex"))
+            guardrails = executor._load_guardrails()
+
+        assert "## Project rules (AGENTS.md)" in guardrails
+        assert "Codex-first rules" in guardrails
+        assert "## Project rules (CLAUDE.md)" not in guardrails
+
+
+class TestCodexRuntime:
+    @pytest.mark.parametrize(
+        ("verdict", "return_code", "kill_reason", "expected_outcome"),
+        [
+            ({"passed": True, "summary": "done"}, 0, None, ex.OUTCOME_COMPLETED),
+            ({"passed": False, "error": "AC failed"}, 0, None, ex.OUTCOME_FAIL),
+            ({"passed": False, "error": "needs key", "blocked": True,
+              "blocked_reason": "API key missing"}, 0, None, ex.OUTCOME_BLOCKED),
+            ({"passed": True, "summary": "stale"}, 7, None, ex.OUTCOME_FAIL),
+            ({"passed": True, "summary": "stale"}, -15,
+             ex.DECISION_KILL_IDLE, ex.OUTCOME_FAIL),
+            (None, 0, None, ex.OUTCOME_FAIL),
+        ],
+    )
+    def test_normalizes_the_common_attempt_matrix(
+            self, tmp_path, verdict, return_code, kill_reason, expected_outcome):
+        def child_runner(cmd, cwd, env):
+            if verdict is not None:
+                Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(verdict))
+            return ex.AttemptResult(
+                outcome=ex.OUTCOME_FAIL,
+                verdict=None,
+                kill_reason=kill_reason,
+                signal=None,
+                elapsed=0.1,
+                last_activity_age=0.0,
+                return_code=return_code,
+                stderr_tail="diagnostic",
+                stdout_tail="event",
+                saw_result_with_structured_output=False,
+            )
+
+        codex = importlib.import_module("runtimes.codex")
+        result = codex.CodexRuntime(child_runner=child_runner).run("PROMPT", str(tmp_path))
+
+        assert result.outcome == expected_outcome
+        assert result.verdict == verdict
+        assert result.return_code == return_code
+        assert result.kill_reason == kill_reason
+        assert result.runtime == "codex"
+        assert result.saw_result_with_structured_output is (verdict is not None)
+
+    def test_run_uses_noninteractive_contract_and_reads_the_final_verdict(self, tmp_path):
+        calls = []
+
+        def child_runner(cmd, cwd, env):
+            calls.append((cmd, cwd, env))
+            output_path = Path(cmd[cmd.index("-o") + 1])
+            schema_path = Path(cmd[cmd.index("--output-schema") + 1])
+            assert json.loads(schema_path.read_text()) == ex.VERDICT_SCHEMA
+            output_path.write_text(json.dumps({"passed": True, "summary": "codex done"}))
+            return ex.AttemptResult(
+                outcome=ex.OUTCOME_FAIL,
+                verdict=None,
+                kill_reason=None,
+                signal=None,
+                elapsed=0.2,
+                last_activity_age=0.0,
+                return_code=0,
+                stderr_tail="",
+                stdout_tail='{"type":"turn.completed"}\n',
+                saw_result_with_structured_output=False,
+            )
+
+        codex = importlib.import_module("runtimes.codex")
+        runtime = codex.CodexRuntime(child_runner=child_runner)
+
+        result = runtime.run("DO THE STEP", str(tmp_path))
+
+        cmd, cwd, _ = calls[0]
+        assert cmd[:7] == [
+            "codex", "exec", "--json", "--ephemeral",
+            "--sandbox", "workspace-write", "--output-schema",
+        ]
+        assert cmd[-3] == "-o"
+        assert cmd[-1] == "DO THE STEP"
+        assert cwd == str(tmp_path)
+        assert result.outcome == ex.OUTCOME_COMPLETED
+        assert result.verdict == {"passed": True, "summary": "codex done"}
+        assert result.runtime == "codex"
+        assert result.saw_result_with_structured_output is True
+
+    def test_run_rejects_a_final_message_that_does_not_match_the_schema(self, tmp_path):
+        def child_runner(cmd, cwd, env):
+            Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps({"summary": "missing passed"}))
+            return ex.AttemptResult(
+                outcome=ex.OUTCOME_FAIL,
+                verdict=None,
+                kill_reason=None,
+                signal=None,
+                elapsed=0.1,
+                last_activity_age=0.0,
+                return_code=0,
+                stderr_tail="",
+                stdout_tail="",
+                saw_result_with_structured_output=False,
+            )
+
+        codex = importlib.import_module("runtimes.codex")
+        result = codex.CodexRuntime(child_runner=child_runner).run("PROMPT", str(tmp_path))
+
+        assert result.outcome == ex.OUTCOME_FAIL
+        assert result.verdict is None
+        assert result.saw_result_with_structured_output is False
+
+    def test_preflight_checks_codex_exec_capabilities(self):
+        codex = importlib.import_module("runtimes.codex")
+        help_text = " ".join(codex.REQUIRED_CLI_CAPABILITIES)
+        calls = []
+
+        def probe(cmd, **kwargs):
+            calls.append(cmd)
+            stdout = "codex-cli 0.151.0" if "--version" in cmd else help_text
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        assert codex.preflight_check(probe) is None
+        assert calls == [
+            ["codex", "--version"],
+            ["codex", "exec", "--help"],
+            ["codex", "login", "status"],
+        ]
+
+    def test_preflight_rejects_an_unauthenticated_codex(self, capsys):
+        codex = importlib.import_module("runtimes.codex")
+        help_text = " ".join(codex.REQUIRED_CLI_CAPABILITIES)
+
+        def probe(cmd, **kwargs):
+            if cmd == ["codex", "login", "status"]:
+                return subprocess.CompletedProcess(cmd, 1, "", "Not logged in")
+            stdout = "codex-cli 0.151.0" if "--version" in cmd else help_text
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        with pytest.raises(SystemExit) as exc_info:
+            codex.preflight_check(probe)
+
+        assert exc_info.value.code == 1
+        output = capsys.readouterr().out
+        assert "codex login status" in output
+        assert "Not logged in" in output
+
+    def test_preflight_rejects_a_missing_codex_capability(self, capsys):
+        codex = importlib.import_module("runtimes.codex")
+        missing = "--output-schema"
+        help_text = " ".join(
+            capability for capability in codex.REQUIRED_CLI_CAPABILITIES
+            if capability != missing
+        )
+
+        def probe(cmd, **kwargs):
+            stdout = "codex-cli 0.151.0" if "--version" in cmd else help_text
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        with pytest.raises(SystemExit) as exc_info:
+            codex.preflight_check(probe)
+
+        assert exc_info.value.code == 1
+        assert missing in capsys.readouterr().out

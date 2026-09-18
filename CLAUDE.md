@@ -1,11 +1,11 @@
-# sg-harness — development guide (project memory)
+# sg-harness — provider-neutral development guide
 
-> This file is the baseline Claude auto-loads every session **when developing sg-harness itself**.
-> It is NOT the same as the CLAUDE.md the harness reads as guardrails inside a *target* project — that one lives in the user's project repo. Don't confuse the two.
+> Claude loads this file directly; Codex enters through the short `AGENTS.md` file at the repository root.
+> This is project memory for developing sg-harness itself, not an instruction file from a target project being operated on by the harness.
 
 ## Purpose (one line)
 
-A Claude Code workflow harness that splits a large task into isolated steps and runs them sequentially with self-correction (design → decompose → execute → knowledge-sync).
+A Claude Code and Codex workflow harness that splits a large task into isolated steps and runs them sequentially with a selected child-agent runtime (design → decompose → execute → knowledge-sync).
 
 ## Vocabulary (canonical — use these exact words everywhere, in code and docs)
 
@@ -27,12 +27,12 @@ The workflow nests along **two axes**. Learn them as two pairs:
 
 ## Layout (flat — `skills/` and `hooks/` live at the repo root)
 
-- `skills/sg-plan/` — **design** stage: runs grill-me, writes `docs/sg/plan/{yyyymmdd}_{task}/plan.md`. Does not implement.
+- `skills/sg-plan/` — **design** stage: runs a self-contained interview, writes `docs/sg/plan/{yyyymmdd}_{task}/plan.md`. Does not implement.
 - `skills/sg-decompose-task/` — **decompose** stage: splits `plan.md` into steps and writes the `docs/sg/tasks/{yyyymmdd}_{task}/` files (index.json + step files). Does not run anything.
-- `skills/sg-execute-task/` — **execute** stage: runs one isolated claude session per step via `scripts/execute.py` (the orchestrator). Tests live in `scripts/test_execute.py`.
+- `skills/sg-execute-task/` — **execute** stage: runs one isolated Claude or Codex child per step via `scripts/execute.py`. Runtime adapters live under `scripts/runtimes/`; the shared verdict schema lives under `scripts/schemas/`.
 - `skills/sg-source-of-truth/` — **knowledge-sync** stage: harvests decisions from `plan.md` + the git diff into the permanent docs (e.g. this file).
-- `hooks/hooks.json` — PreToolUse Bash guard that blocks `rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`.
-- `.claude-plugin/plugin.json` + `marketplace.json` — plugin manifest and single-plugin marketplace (`source: "."`); `skills/` and `hooks/` are auto-discovered from the plugin root. Install: `/plugin marketplace add han0001/sg-harness`.
+- `hooks/hooks.json` — PreToolUse Bash guard that blocks `rm -rf`, `git push --force`, `git reset --hard`, `DROP TABLE`; host payload tests live in `hooks/test_hooks.py`.
+- `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` — provider manifests with one shared version and the same `skills/` tree. `.claude-plugin/marketplace.json` remains the Claude marketplace descriptor.
 
 > **Working state lives under `docs/sg/`** in the *target* project — `docs/sg/plan/` (sg-plan) and `docs/sg/tasks/` (sg-decompose-task + execute.py). Nested under `docs/` to keep the project root clean, yet kept **separate from top-level `docs/*.md`**, which the harness injects as guardrails. This is safe because the guardrail injection globs `docs/*.md` **non-recursively** (`execute.py._load_guardrails`), so nested working files are never pulled into step prompts.
 
@@ -46,10 +46,14 @@ The workflow nests along **two axes**. Learn them as two pairs:
 ## Invariants (contracts that must never break — every change must pass these)
 
 1. **Target = the git root of cwd**, never the script's own install location.
-2. **Only the orchestrator (`execute.py`) touches git.** Child Claude sessions must NOT be instructed to commit or push — the preamble explicitly forbids it.
+2. **Only the orchestrator (`execute.py`) touches git.** Child runtimes must NOT be instructed to commit or push — the preamble explicitly forbids it.
 3. **Step files are self-contained** — no references to external/earlier conversation.
 4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded, basis for the `feat-{task}` branch).
 5. **Refuse to run if not a git repo.**
+6. **Runtime selection is explicit.** The CLI accepts only `claude` or `codex`; omitted `--runtime` remains backward-compatible and selects `claude`. Never auto-fallback to another runtime.
+7. **Preflight before mutation.** The selected runtime validates its executable and capabilities before blocker checks, git operations, or state writes.
+8. **Instruction precedence is runtime-specific.** Claude uses `CLAUDE.md`, then `AGENTS.md`; Codex uses `AGENTS.md`, then `CLAUDE.md`. Inject only the first existing file.
+9. **One verdict contract.** Both runtimes must return the schema in `skills/sg-execute-task/scripts/schemas/verdict.schema.json` and normalize it into `AttemptResult`.
 
 ## Working discipline (how we work in this repo)
 
@@ -61,5 +65,6 @@ The workflow nests along **two axes**. Learn them as two pairs:
 ## Dev commands
 
 ```bash
-.venv/bin/python -m pytest skills/sg-execute-task/scripts/test_execute.py -q
+python3 -m pytest skills/sg-execute-task/scripts/test_execute.py hooks/test_hooks.py -q
+python3 skills/sg-execute-task/scripts/execute.py --help
 ```

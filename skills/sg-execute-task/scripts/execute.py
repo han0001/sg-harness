@@ -3,7 +3,7 @@
 Harness Step Executor — runs the steps within a task sequentially and self-corrects.
 
 Usage (run from the user's project root):
-    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/execute.py" <task-dir> [--push]
+    python3 "<installed-skill-dir>/scripts/execute.py" <task-dir> [--runtime claude|codex] [--push]
 
 ROOT (the target of the work) is the git root of cwd, independent of the script's own location.
 """
@@ -11,19 +11,51 @@ ROOT (the target of the work) is the git root of cwd, independent of the script'
 import argparse
 import contextlib
 import json
-import os
-import re
-import signal
 import subprocess
 import sys
 import threading
 import time
 import types
-from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Callable, NoReturn, Optional
+from typing import Callable, Optional
+
+from runtimes import AgentRuntime, get_runtime
+from runtimes.base import (
+    AttemptResult,
+    OUTCOME_BLOCKED,
+    OUTCOME_COMPLETED,
+    OUTCOME_FAIL,
+    VERDICT_SCHEMA,
+    attempt_error_message,
+    classify_outcome,
+)
+from runtimes.claude import (
+    BASH_MAX_TIMEOUT_MS,
+    DECISION_KEEP,
+    DECISION_KILL_IDLE,
+    DECISION_KILL_WALL,
+    KILL_GRACE_SEC,
+    MAX_TURNS,
+    MIN_CLAUDE_VERSION,
+    READER_JOIN_SEC,
+    REQUIRED_CLI_CAPABILITIES,
+    StreamState,
+    TAIL_CHARS,
+    TAIL_LINES,
+    T_IDLE_SEC,
+    T_MAX_SEC,
+    _parse_cli_version,
+    _preflight_abort,
+    _probe_cli,
+    _safe_json_loads,
+    is_result_event,
+    parse_verdict,
+    preflight_check,
+    run_child,
+    timeout_decision,
+)
 
 def _find_project_root() -> Path:
     """Find the root of the project being worked on.
@@ -82,409 +114,7 @@ def progress_indicator(label: str):
         info.elapsed = time.monotonic() - t0
 
 
-# ---------------------------------------------------------------------------
-# Verdict contract — the pure core.
-#
-# The child session no longer edits `index.json`; it is invoked with `--json-schema` and
-# reports a verdict through the final `result` event's `structured_output`. Everything
-# below is pure: no subprocess, no threads, no clock, no file I/O — the Runner owns all of
-# that. The stream-json event schema is officially undocumented, so every function here
-# parses defensively: ambiguity resolves to `fail`, never to a raised exception.
-# ---------------------------------------------------------------------------
-
-VERDICT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "passed": {"type": "boolean"},
-        "summary": {"type": "string"},
-        "error": {"type": "string"},
-        "blocked": {"type": "boolean"},
-        "blocked_reason": {"type": "string"},
-    },
-    "required": ["passed"],
-    # Diagnosability: a failure must say why, a block must say what it needs. Each `if`
-    # repeats the key in its own `required` — without that, `properties` is vacuously
-    # satisfied by an object that omits the key, and the `then` clause would fire on
-    # verdicts that never mentioned `passed`/`blocked` at all.
-    "allOf": [
-        {
-            "if": {"properties": {"passed": {"const": False}}, "required": ["passed"]},
-            "then": {"required": ["error"]},
-        },
-        {
-            "if": {"properties": {"blocked": {"const": True}}, "required": ["blocked"]},
-            "then": {"required": ["blocked_reason"]},
-        },
-    ],
-}
-
-# The closed vocabulary `classify_outcome` returns; the Runner routes on exactly these.
-OUTCOME_COMPLETED = "completed"
-OUTCOME_BLOCKED = "blocked"
-OUTCOME_FAIL = "fail"
-
-
-def is_result_event(obj: dict) -> bool:
-    """True if `obj` looks like the final `result` event of a stream-json stream.
-
-    Lenient by design: the event schema is undocumented, so we key only on a `type`/`role`
-    field literally equal to "result" and assume nothing else about the shape.
-    """
-    if not isinstance(obj, dict):
-        return False
-    return any(obj.get(key) == "result" for key in ("type", "role"))
-
-
-def parse_verdict(result_event: dict) -> Optional[dict]:
-    """Extract the child's verdict from an already-parsed `result` event.
-
-    Returns the `structured_output` dict, or None when it is absent or not a dict — which
-    covers a `success` subtype carrying no `structured_output` (D7). Never raises: an
-    unexpected stream shape must degrade to `fail`, not to a traceback (that crash class is
-    exactly what this task removes).
-    """
-    if not isinstance(result_event, dict):
-        return None
-    verdict = result_event.get("structured_output")
-    return verdict if isinstance(verdict, dict) else None
-
-
-def classify_outcome(verdict: Optional[dict], kill_reason: Optional[str]) -> str:
-    """Map (verdict, kill_reason) onto exactly one outcome: completed / blocked / fail.
-
-    D7 routes every failure mode — a timeout kill (`kill_reason`, e.g. "timeout-idle"), a
-    missing or malformed verdict, and an explicit `passed=false` — into the single `fail`
-    channel the retry loop already handles. `blocked` outranks `passed` so a child needing
-    human intervention stops the run even if it also claimed to pass.
-    """
-    if kill_reason:
-        return OUTCOME_FAIL
-    if not isinstance(verdict, dict):
-        return OUTCOME_FAIL
-    if verdict.get("blocked") is True:
-        return OUTCOME_BLOCKED
-    if verdict.get("passed") is True:
-        return OUTCOME_COMPLETED
-    # `passed` false, missing, or a non-bool truthy value (e.g. "yes") — all ambiguous, all fail.
-    return OUTCOME_FAIL
-
-
-# ---------------------------------------------------------------------------
-# Preflight — the mandatory capability gate (D9).
-#
-# The contract above only holds if the local `claude` actually implements it. An older CLI
-# ignores an unknown `--json-schema` without complaint and may truncate the stream tail, so
-# the failure mode is the worst kind: a run that looks healthy while every step fails for a
-# reason no log explains. Hence Fail-Fast — probe once, before ANY git or state mutation,
-# and refuse to start otherwise. Deliberately not a `--flag`: an opt-out would just make the
-# silent-misbehaviour mode reachable again.
-# ---------------------------------------------------------------------------
-
-# The floor is empirically verified, not guessed: `stream-json` + `--json-schema` was smoke-
-# tested end-to-end on this version (plan §7). Compared as a tuple so 2.1.9 < 2.1.216 — the
-# string comparison a version check invites gets that backwards.
-MIN_CLAUDE_VERSION = (2, 1, 216)
-
-# Substrings `claude --help` must advertise for the invocation in `_invoke_claude` to work.
-REQUIRED_CLI_CAPABILITIES = ("--json-schema", "--output-format", "stream-json")
-
-_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
-
-
-def _parse_cli_version(text: str) -> Optional[tuple]:
-    """Extract (major, minor, patch) from `claude --version` output, or None if absent.
-
-    Today the output is `2.1.220 (Claude Code)`, but its exact shape is not a documented
-    contract — so we search for the first `x.y.z` instead of parsing positionally, and treat
-    "no version found" as a preflight failure rather than optimistically assuming it's new
-    enough.
-    """
-    match = _VERSION_RE.search(text or "")
-    return tuple(int(g) for g in match.groups()) if match else None
-
-
-def _preflight_abort(problem: str) -> NoReturn:
-    """Report what is wrong, what is required, and how to fix it — then stop the run."""
-    floor = ".".join(str(n) for n in MIN_CLAUDE_VERSION)
-    print(f"\n  ✗ Preflight failed: {problem}")
-    print(f"  This harness requires the `claude` CLI >= {floor}, supporting "
-          f"`--json-schema` and `--output-format stream-json`.")
-    print(f"  Fix: run `claude update` (or `npm install -g @anthropic-ai/claude-code@latest`), "
-          f"then re-run this command.")
-    sys.exit(1)
-
-
-def _probe_cli(run: Callable[..., subprocess.CompletedProcess], args: list) -> str:
-    """Run `claude <args>` and return its stdout; abort on anything but a clean exit.
-
-    A missing binary surfaces as OSError (FileNotFoundError) rather than a return code, so
-    both have to be handled — either way the answer is the same abort.
-    """
-    argv = ["claude"] + args
-    try:
-        proc = run(argv, capture_output=True, text=True)
-    except OSError as e:
-        _preflight_abort(f"could not execute `{' '.join(argv)}` ({e})")
-    if proc.returncode != 0:
-        _preflight_abort(f"`{' '.join(argv)}` exited with code {proc.returncode}: "
-                         f"{(proc.stderr or '').strip()[:200]}")
-    return proc.stdout or ""
-
-
-def preflight_check(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
-    """Abort the run unless the local `claude` can honour the verdict contract (D9).
-
-    Returns None and prints nothing when the CLI is usable — a gate that passes should be
-    invisible. The subprocess runner is injected so this is testable without a real CLI:
-    plan §6's default gate is L1 (no network, no auth, no cost).
-    """
-    version = _parse_cli_version(_probe_cli(run, ["--version"]))
-    if version is None:
-        _preflight_abort("`claude --version` printed no recognisable version number")
-    if version < MIN_CLAUDE_VERSION:
-        found = ".".join(str(n) for n in version)
-        _preflight_abort(f"the installed claude is {found}, older than the required floor")
-
-    help_text = _probe_cli(run, ["--help"])
-    missing = [cap for cap in REQUIRED_CLI_CAPABILITIES if cap not in help_text]
-    if missing:
-        _preflight_abort(f"this claude does not advertise {', '.join(missing)}")
-
-
-# ---------------------------------------------------------------------------
-# Liveness runner — spawn the child, bound it, reap it.
-#
-# The old `subprocess.run(..., timeout=1800)` was wrong twice over: a fixed 30-min
-# wall-clock false-kills a legitimately long step, and `timeout=` only *raises* — it never
-# signals the child, let alone the bash/test grandchildren it spawned. This section replaces
-# it with the layered bound of plan D2: an idle watchdog (fast detector) over a wall-clock
-# backstop, plus `--max-turns` as a semantic cap, all reported as one `AttemptResult`.
-# ---------------------------------------------------------------------------
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer tuning knob from the environment, falling back to `default`.
-
-    The `SG_` prefix is deliberate: `BASH_MAX_TIMEOUT_MS` below is a value we *set on the
-    child*, so reading our own configuration from that same name would make one variable
-    mean two things.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        print(f"  WARN: {name}={raw!r} is not an integer; using the default {default}")
-        return default
-
-
-# Tuning knobs — module-level so a test can monkeypatch sub-second values.
-BASH_MAX_TIMEOUT_MS = _env_int("SG_BASH_MAX_TIMEOUT_MS", 8 * 60 * 1000)  # child's max legit silence (D4)
-T_IDLE_SEC = _env_int("SG_T_IDLE_SEC", 12 * 60)      # idle watchdog — sized above the Bash cap + margin
-T_MAX_SEC = _env_int("SG_T_MAX_SEC", 90 * 60)        # wall-clock backstop
-MAX_TURNS = _env_int("SG_MAX_TURNS", 50)             # --max-turns semantic cap
-
-POLL_INTERVAL_SEC = 0.05   # how often the watchdog re-evaluates `timeout_decision`
-KILL_GRACE_SEC = 5.0       # SIGTERM → grace → SIGKILL
-READER_JOIN_SEC = 5.0      # bounded join, so a grandchild holding the pipe cannot hang us
-TAIL_LINES = 50            # lines kept per pipe for diagnostics
-TAIL_CHARS = 4000          # hard cap on each tail written to step{N}-output.json
-
-DECISION_KEEP = "keep"
-DECISION_KILL_IDLE = "kill-idle"
-DECISION_KILL_WALL = "kill-wall"
-
-
-def timeout_decision(now: float, last_activity: float, start: float,
-                     t_idle: float, t_max: float) -> str:
-    """Decide whether the child may keep running. Pure: every input is injected.
-
-    Isolating the decision from the timing mechanics is what makes the layered bound
-    testable in microseconds instead of `sleep(720)` (plan §6 L1). The wall-clock is checked
-    first so that a run which blew its total budget is reported as such even if it also went
-    quiet at the very end.
-    """
-    if now - start > t_max:
-        return DECISION_KILL_WALL
-    if now - last_activity > t_idle:
-        return DECISION_KILL_IDLE
-    return DECISION_KEEP
-
-
-@dataclass
-class AttemptResult:
-    """Everything one child run produced — the sole basis for routing the step (D6/D10).
-
-    `kill_reason` doubles as the diagnosis: it is `None` on a natural exit and otherwise the
-    `timeout_decision` value that ended the run, so a timeout is diagnosable and not merely
-    retryable.
-    """
-    outcome: str
-    verdict: Optional[dict]
-    kill_reason: Optional[str]
-    signal: Optional[int]
-    elapsed: float
-    last_activity_age: float
-    return_code: Optional[int]
-    stderr_tail: str
-    stdout_tail: str
-    saw_result_with_structured_output: bool
-
-
-def attempt_error_message(result: AttemptResult) -> str:
-    """The human-readable reason an attempt failed — recorded, printed, and fed to the retry.
-
-    A kill outranks the verdict because `classify_outcome` already short-circuits on it: a
-    child killed mid-thought may well have emitted a stale-but-passing verdict earlier.
-    """
-    if result.kill_reason:
-        return (f"{result.kill_reason} (elapsed {result.elapsed:.0f}s, "
-                f"silent for {result.last_activity_age:.0f}s)")
-    if isinstance(result.verdict, dict) and result.verdict.get("error"):
-        return str(result.verdict["error"])
-    return f"the child returned no usable verdict (exit code {result.return_code})"
-
-
-def _safe_json_loads(line: str) -> Optional[dict]:
-    """Parse one NDJSON line, or None. Never raises — a malformed line is not an error here.
-
-    The stream carries whatever the CLI decides to print; letting one odd line raise inside a
-    reader thread would kill the liveness signal and reintroduce the crash class this task
-    removes.
-    """
-    try:
-        obj = json.loads(line)
-    except (ValueError, TypeError):
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
-class StreamState:
-    """Liveness stamp + parse state shared between the reader threads and the watchdog.
-
-    `last_activity` has exactly one writer (the stdout reader) and one reader (the watchdog),
-    so a plain float assignment is enough — no lock. Liveness keys on *a line arriving*, never
-    on its type (D3): the stream-json event schema is undocumented, so any other rule would
-    silently start false-killing the day the CLI adds an event. stderr does not stamp
-    liveness — it is drained for hygiene, but a child babbling warnings while making no
-    progress is exactly what the idle watchdog is for.
-    """
-
-    def __init__(self, *, now: Callable[[], float] = time.monotonic):
-        self._now = now
-        self.last_activity = now()
-        self.result_event: Optional[dict] = None
-        self.stdout_tail = deque(maxlen=TAIL_LINES)
-        self.stderr_tail = deque(maxlen=TAIL_LINES)
-
-    def on_stdout_line(self, line: str):
-        self.last_activity = self._now()
-        self.stdout_tail.append(line)
-        obj = _safe_json_loads(line)
-        if obj is not None and is_result_event(obj):
-            self.result_event = obj
-
-    def on_stderr_line(self, line: str):
-        self.stderr_tail.append(line)
-
-
-def _tail_text(lines) -> str:
-    text = "".join(lines)
-    return text[-TAIL_CHARS:]
-
-
-def _drain(stream, on_line: Callable[[str], None]):
-    """Read `stream` line by line until EOF, handing each raw line to `on_line`."""
-    with contextlib.suppress(OSError, ValueError):
-        for line in iter(stream.readline, ""):
-            on_line(line)
-
-
-def _kill_process_group(proc: subprocess.Popen, grace: float) -> Optional[int]:
-    """SIGTERM the child's whole process group, then SIGKILL it. Returns the signal that ended it.
-
-    The group (not just the leader) is signalled because the child spawns bash/test
-    grandchildren that would otherwise survive and keep the stdout pipe open. Every step
-    tolerates the child exiting on its own mid-kill — that is a race we win either way, not
-    an error.
-    """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return None
-
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=grace)
-        return int(signal.SIGTERM)
-    except subprocess.TimeoutExpired:
-        pass
-
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, signal.SIGKILL)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=grace)
-    return int(signal.SIGKILL)
-
-
-def run_child(cmd: list, cwd: str, env: dict) -> AttemptResult:
-    """Run one child session under the layered bound and report the attempt.
-
-    Threading model: two daemon reader threads drain stdout and stderr *concurrently* (a full
-    stderr pipe blocks the child's writes and deadlocks the run — D8), while this thread is
-    the watchdog. A kill always yields a deterministic `fail` outcome, so every failure mode
-    funnels into the one retry path the caller already has.
-    """
-    state = StreamState()
-    start = time.monotonic()
-
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
-    )
-
-    readers = [
-        threading.Thread(target=_drain, args=(proc.stdout, state.on_stdout_line), daemon=True),
-        threading.Thread(target=_drain, args=(proc.stderr, state.on_stderr_line), daemon=True),
-    ]
-    for th in readers:
-        th.start()
-
-    kill_reason = None
-    sig = None
-    while proc.poll() is None:
-        decision = timeout_decision(time.monotonic(), state.last_activity, start,
-                                    T_IDLE_SEC, T_MAX_SEC)
-        if decision != DECISION_KEEP:
-            kill_reason = decision
-            sig = _kill_process_group(proc, KILL_GRACE_SEC)
-            break
-        time.sleep(POLL_INTERVAL_SEC)
-
-    for th in readers:
-        th.join(timeout=READER_JOIN_SEC)
-    for pipe in (proc.stdout, proc.stderr):
-        with contextlib.suppress(OSError, ValueError):
-            pipe.close()
-
-    verdict = parse_verdict(state.result_event)
-    now = time.monotonic()
-    return AttemptResult(
-        outcome=classify_outcome(verdict, kill_reason),
-        verdict=verdict,
-        kill_reason=kill_reason,
-        signal=sig,
-        elapsed=round(now - start, 3),
-        last_activity_age=round(now - state.last_activity, 3),
-        return_code=proc.returncode,
-        stderr_tail=_tail_text(state.stderr_tail),
-        stdout_tail=_tail_text(state.stdout_tail),
-        saw_result_with_structured_output=verdict is not None,
-    )
-
-
+# Runtime contracts and provider-specific helpers are imported above for compatibility.
 class StateStore:
     """Sole owner of the task state files: the per-task `index.json` and the top-level index.
 
@@ -521,6 +151,25 @@ class StateStore:
 
     def load(self) -> dict:
         return self.read_json(self._index_file)
+
+    @contextlib.contextmanager
+    def preserve_indexes(self):
+        """Restore harness-owned indexes after an untrusted child process returns."""
+        snapshots = {
+            path: path.read_bytes() if path.exists() else None
+            for path in (self._index_file, self._top_index_file)
+        }
+        try:
+            yield
+        finally:
+            for path, content in snapshots.items():
+                if content is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        path.unlink()
+                    continue
+                if path.is_symlink():
+                    path.unlink()
+                path.write_bytes(content)
 
     def _field_of(self, step_num: int, key: str, default):
         return next((s.get(key, default) for s in self.load()["steps"] if s["step"] == step_num), default)
@@ -668,13 +317,15 @@ class StepExecutor:
     FEAT_MSG = "feat({task}): step {num} — {name}"
     CHORE_MSG = "chore({task}): step {num} output"
 
-    def __init__(self, task_dir_name: str, *, auto_push: bool = False):
+    def __init__(self, task_dir_name: str, *, auto_push: bool = False,
+                 runtime: Optional[AgentRuntime] = None):
         self._root = str(ROOT)
         self._tasks_dir = ROOT / "docs" / "sg" / "tasks"
         self._task_dir = self._tasks_dir / task_dir_name
         self._task_dir_name = task_dir_name
         self._top_index_file = self._tasks_dir / "index.json"
         self._auto_push = auto_push
+        self._runtime = runtime or get_runtime()
 
         if not self._task_dir.is_dir():
             print(f"ERROR: {self._task_dir} not found")
@@ -695,7 +346,7 @@ class StepExecutor:
     def run(self, once: bool = False):
         # First, before the header and before anything touches git or index.json: a CLI that
         # cannot honour the verdict contract must abort the run, not half-mutate it (D9).
-        preflight_check()
+        self._runtime.preflight()
         self._print_header()
         self._state.check_blockers()
         self._checkout_branch()
@@ -784,9 +435,15 @@ class StepExecutor:
 
     def _load_guardrails(self) -> str:
         sections = []
-        claude_md = ROOT / "CLAUDE.md"
-        if claude_md.exists():
-            sections.append(f"## Project rules (CLAUDE.md)\n\n{claude_md.read_text()}")
+        instruction_files = getattr(self, "_runtime", None)
+        instruction_files = getattr(instruction_files, "instruction_files", ("CLAUDE.md",))
+        for filename in instruction_files:
+            instruction_file = ROOT / filename
+            if instruction_file.exists():
+                sections.append(
+                    f"## Project rules ({filename})\n\n{instruction_file.read_text()}"
+                )
+                break
         docs_dir = ROOT / "docs"
         if docs_dir.is_dir():
             for doc in sorted(docs_dir.glob("*.md")):
@@ -821,10 +478,10 @@ class StepExecutor:
             f"once the AC passes — your job is only to make the changes, run the AC, and return the verdict.\n\n---\n\n"
         )
 
-    # --- Claude invocation ---
+    # --- runtime invocation ---
 
-    def _invoke_claude(self, step: dict, preamble: str, attempt: int = 1) -> AttemptResult:
-        """Run one child session for this step and record the full attempt for diagnosis."""
+    def _invoke_runtime(self, step: dict, preamble: str, attempt: int = 1) -> AttemptResult:
+        """Run one child session through the selected runtime and record the attempt."""
         step_num, step_name = step["step"], step["name"]
         step_file = self._task_dir / f"step{step_num}.md"
 
@@ -833,22 +490,8 @@ class StepExecutor:
             sys.exit(1)
 
         prompt = preamble + step_file.read_text()
-        cmd = [
-            "claude", "-p", "--dangerously-skip-permissions",
-            "--output-format", "stream-json", "--verbose",
-            "--json-schema", json.dumps(VERDICT_SCHEMA),
-            "--max-turns", str(MAX_TURNS),
-            prompt,
-        ]
-        # Bounding the child's own Bash timeout turns "max legitimate silence" from a measured
-        # unknown into a controlled quantity, which is what lets T_IDLE_SEC be sized safely (D4).
-        env = {
-            **os.environ,
-            "BASH_MAX_TIMEOUT_MS": str(BASH_MAX_TIMEOUT_MS),
-            "BASH_DEFAULT_TIMEOUT_MS": str(BASH_MAX_TIMEOUT_MS),
-        }
-
-        result = run_child(cmd, cwd=self._root, env=env)
+        with self._state.preserve_indexes():
+            result = self._runtime.run(prompt, cwd=self._root)
 
         output = {"step": step_num, "name": step_name, "attempt": attempt, **asdict(result)}
         out_path = self._task_dir / f"step{step_num}-output.json"
@@ -856,6 +499,10 @@ class StepExecutor:
             json.dump(output, f, indent=2, ensure_ascii=False)
 
         return result
+
+    def _invoke_claude(self, step: dict, preamble: str, attempt: int = 1) -> AttemptResult:
+        """Compatibility alias for callers that used the former Claude-specific helper."""
+        return self._invoke_runtime(step, preamble, attempt)
 
     # --- header & checks ---
 
@@ -874,7 +521,7 @@ class StepExecutor:
 
         Status is driven **solely** by the `AttemptResult` the child returned, and written
         **solely** through the StateStore. The child's own copy of `index.json` is never read
-        for control flow, so a stray edit under `--dangerously-skip-permissions` is discarded
+        for control flow, so a stray child edit to that file is discarded
         rather than trusted (D6) — which is what makes T1-B impossible by construction rather
         than merely discouraged.
         """
@@ -891,7 +538,7 @@ class StepExecutor:
                 tag += f" [retry {attempt}/{self.MAX_RETRIES}]"
 
             with progress_indicator(tag) as pi:
-                result = self._invoke_claude(step, preamble, attempt)
+                result = self._invoke_runtime(step, preamble, attempt)
                 elapsed = int(pi.elapsed)
 
             verdict = result.verdict if isinstance(result.verdict, dict) else {}
@@ -969,14 +616,28 @@ class StepExecutor:
         print(f"{'='*60}")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Harness Step Executor")
     parser.add_argument("task_dir", help="Task directory name (e.g. 20260616_task-name)")
     parser.add_argument("--push", action="store_true", help="Push branch after completion")
     parser.add_argument("--once", action="store_true", help="Run only the next pending step, then exit")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--runtime",
+        choices=("claude", "codex"),
+        default="claude",
+        help="Child agent runtime (default: claude)",
+    )
+    return parser
 
-    StepExecutor(args.task_dir, auto_push=args.push).run(once=args.once)
+
+def main():
+    args = build_parser().parse_args()
+
+    StepExecutor(
+        args.task_dir,
+        auto_push=args.push,
+        runtime=get_runtime(args.runtime),
+    ).run(once=args.once)
 
 
 if __name__ == "__main__":

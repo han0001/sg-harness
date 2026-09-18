@@ -1,0 +1,28 @@
+{
+  "name": "sg-harness",
+  "version": "1.0.0",
+  "description": "A provider-neutral workflow for design, decomposition, sequential child-agent execution, and knowledge sync.",
+  "author": {
+    "name": "han0001",
+    "url": "https://github.com/han0001"
+  },
+  "homepage": "https://github.com/han0001/sg-harness",
+  "repository": "https://github.com/han0001/sg-harness",
+  "license": "MIT",
+  "keywords": ["workflow", "harness", "spec-driven", "orchestration", "claude", "codex"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SG Harness",
+    "shortDescription": "Plan and execute guarded agent tasks",
+    "longDescription": "Design a task, decompose it into isolated steps, execute each step with Claude or Codex, and sync verified decisions into permanent documentation.",
+    "developerName": "han0001",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "websiteURL": "https://github.com/han0001/sg-harness",
+    "defaultPrompt": [
+      "Design this task with SG Harness.",
+      "Decompose the approved SG plan into executable steps.",
+      "Execute this SG task with the selected runtime."
+    ]
+  }
+}

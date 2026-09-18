@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); if printf '%s' \"$input\" | grep -qE 'rm[[:space:]]+-rf|git[[:space:]]+push[[:space:]]+--force|git[[:space:]]+reset[[:space:]]+--hard|DROP[[:space:]]+TABLE'; then echo 'BLOCKED: a dangerous command was detected.' >&2; exit 2; fi"
+            "command": "python3 -c 'import json,re,sys; payload=json.load(sys.stdin); command=payload.get(\"tool_input\", {}).get(\"command\", \"\"); blocked=re.search(r\"rm\\s+-rf|git\\s+push\\s+--force|git\\s+reset\\s+--hard|DROP\\s+TABLE\", command) is not None; print(\"BLOCKED: a dangerous command was detected.\", file=sys.stderr) if blocked else None; raise SystemExit(2 if blocked else 0)'"
           }
         ]
       }
