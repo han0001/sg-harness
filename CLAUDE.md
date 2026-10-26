@@ -39,7 +39,7 @@ The workflow nests along **two axes**. Learn them as two pairs:
 ## Non-Goals (things we deliberately do NOT do — check new ideas against this list FIRST)
 
 - **No parallel step execution / no per-step git worktree.** Steps run sequentially, so there is no concurrency conflict to isolate. Do not introduce worktrees unless parallel execution is formally adopted.
-- **No deploy.** The most the harness does is `git push` (opt-in `--push`, to a `feat-*` branch).
+- **No deploy.** The most the harness does is `git push` (opt-in `--push`, to the task branch — never `main`/`master`).
 - **No multi-user / concurrency handling.**
 - **No forcing the target project's language.** The harness's own source is English-only.
 
@@ -48,7 +48,7 @@ The workflow nests along **two axes**. Learn them as two pairs:
 1. **Target = the git root of cwd**, never the script's own install location.
 2. **Only the orchestrator (`execute.py`) touches git.** Child runtimes must NOT be instructed to commit or push — the preamble explicitly forbids it.
 3. **Step files are self-contained** — no references to external/earlier conversation.
-4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded, basis for the `feat-{task}` branch).
+4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded, basis for the default `feat-{task}` branch). An optional per-task index `branch` field overrides the branch name so a target project's existing convention can be followed; `main`/`master` and names starting with `-` are always refused.
 5. **Refuse to run if not a git repo.**
 6. **Runtime selection is explicit.** The CLI accepts only `claude` or `codex`; omitted `--runtime` remains backward-compatible and selects `claude`. Never auto-fallback to another runtime.
 7. **Preflight before mutation.** The selected runtime validates its executable and capabilities before blocker checks, git operations, or state writes.

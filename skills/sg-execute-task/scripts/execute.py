@@ -316,6 +316,8 @@ class StepExecutor:
     MAX_RETRIES = 3
     FEAT_MSG = "feat({task}): step {num} — {name}"
     CHORE_MSG = "chore({task}): step {num} output"
+    # The orchestrator commits (and may push) to the task branch, so it must never be a trunk.
+    PROTECTED_BRANCHES = ("main", "master")
 
     def __init__(self, task_dir_name: str, *, auto_push: bool = False,
                  runtime: Optional[AgentRuntime] = None):
@@ -341,7 +343,19 @@ class StepExecutor:
         idx = self._state.load()
         self._project = idx.get("project", "project")
         self._task_name = idx.get("task", task_dir_name)
+        self._branch = self._resolve_branch(idx)
         self._total = len(idx["steps"])
+
+    def _resolve_branch(self, idx: dict) -> str:
+        """The per-task index `branch` (the target project's naming convention), else `feat-{task}`."""
+        branch = idx.get("branch") or f"feat-{self._task_name}"
+        # A leading '-' would be parsed by git as an option (e.g. `git push -u origin --force`).
+        if not isinstance(branch, str) or branch in self.PROTECTED_BRANCHES or branch.startswith("-"):
+            print(f"ERROR: invalid task branch {branch!r} in {self._index_file}")
+            print(f"  The task branch must be a string, must not start with '-', "
+                  f"and must not be one of {', '.join(self.PROTECTED_BRANCHES)}.")
+            sys.exit(1)
+        return branch
 
     def run(self, once: bool = False):
         # First, before the header and before anything touches git or index.json: a CLI that
@@ -386,7 +400,7 @@ class StepExecutor:
         return subprocess.run(cmd, cwd=self._root, capture_output=True, text=True)
 
     def _checkout_branch(self):
-        branch = f"feat-{self._task_name}"
+        branch = self._branch
 
         r = self._run_git("rev-parse", "--abbrev-ref", "HEAD")
         if r.returncode != 0:
@@ -604,7 +618,7 @@ class StepExecutor:
                 print(f"  ✓ {msg}")
 
         if self._auto_push:
-            branch = f"feat-{self._task_name}"
+            branch = self._branch
             r = self._run_git("push", "-u", "origin", branch)
             if r.returncode != 0:
                 print(f"\n  ERROR: git push failed: {r.stderr.strip()}")

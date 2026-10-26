@@ -51,7 +51,7 @@ Once the user approves, create the following files in the user's project (cwd).
 
 > **⚠ Naming contract (directly tied to Fail-Fast).** The two names point to different levels, so distinguish them precisely:
 > - top index `dir` = **the folder name verbatim** = `{yyyymmdd}_{task-name}` (date **included**). execute.py matches the top index by this value; a mismatch desyncs the status and raises a `WARN`.
-> - per-task index `task` = **task name only** = `{task-name}` (date **excluded**). execute.py creates the `feat-{task-name}` branch from this value.
+> - per-task index `task` = **task name only** = `{task-name}` (date **excluded**). execute.py creates the `feat-{task-name}` branch from this value unless the optional `branch` field overrides it.
 
 #### C-1. `docs/sg/tasks/index.json` (overall status)
 
@@ -75,6 +75,7 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 {
   "project": "<project-name>",
   "task": "{task-name}",
+  "branch": "<optional — e.g. feature/BE-1000>",
   "steps": [
     { "step": 0, "name": "project-setup", "status": "pending" },
     { "step": 1, "name": "core-types", "status": "pending" }
@@ -83,7 +84,13 @@ A top-level index that manages multiple tasks. If it already exists, append a ne
 ```
 
 - `project`: use the name from permanent docs first, then standard project metadata, then the git-root directory name.
-- `task`: **task name only** (date excluded). It is the basis for the branch name `feat-{task-name}`.
+- `task`: **task name only** (date excluded). It is the basis for the default branch name `feat-{task-name}`.
+- `branch` (optional): the branch execute.py creates or checks out, commits to, and pushes with `--push`. Decide it before writing the file:
+  1. If the user named a branch, use it.
+  2. Otherwise, if the target project already has a branch naming convention — stated in its instruction files or contributing docs, or evident from recent branches (`git branch -r --sort=-committerdate`) — propose a concrete name that follows it (for example, fill in the ticket ID) and confirm it with the user as part of the step-design approval.
+  3. Otherwise, omit the field; execute.py falls back to `feat-{task-name}`.
+
+  Never set it to `main` or `master`, or to a name starting with `-`; execute.py refuses them because it commits automatically and passes the name to git.
 - `steps[].step`: a 0-based sequence number.
 - `steps[].name`: a kebab-case slug.
 - `steps[].status`: all initialized to `"pending"`.
