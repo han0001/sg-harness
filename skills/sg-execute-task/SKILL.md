@@ -48,7 +48,7 @@ The target is always the **git root of cwd**, not the plugin installation direct
 
 `execute.py`:
 
-- creates or checks out `feat-{task-name}`;
+- creates or checks out the task branch — the per-task index `branch` when set, else `feat-{task-name}` — and refuses `main`/`master`;
 - loads project instructions with runtime-specific precedence (`CLAUDE.md` first for Claude, `AGENTS.md` first for Codex), plus top-level `docs/*.md`;
 - passes completed-step summaries into the next prompt;
 - retries failed attempts up to three times with the previous error;

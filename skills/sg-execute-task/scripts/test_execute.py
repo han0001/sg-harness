@@ -400,6 +400,67 @@ class TestCheckoutBranch:
 
 
 # ---------------------------------------------------------------------------
+# Task branch (per-task index `branch`, default feat-{task})
+# ---------------------------------------------------------------------------
+
+class TestTaskBranch:
+    @staticmethod
+    def _executor_with_branch(tmp_project, task_dir, branch):
+        index = json.loads((task_dir / "index.json").read_text())
+        index["branch"] = branch
+        (task_dir / "index.json").write_text(json.dumps(index))
+        with patch.object(ex, "ROOT", tmp_project):
+            return ex.StepExecutor("0-mvp")
+
+    @staticmethod
+    def _record_git(inst, current_branch="main", branch_exists=False):
+        calls = []
+        def fake_git(*args):
+            calls.append(args)
+            if args[:2] == ("rev-parse", "--abbrev-ref"):
+                return MagicMock(returncode=0, stdout=f"{current_branch}\n", stderr="")
+            if args[:2] == ("rev-parse", "--verify"):
+                return MagicMock(returncode=0 if branch_exists else 1, stdout="", stderr="")
+            if args[:2] == ("diff", "--cached"):
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        inst._run_git = fake_git
+        return calls
+
+    def test_defaults_to_feat_task(self, executor):
+        assert executor._branch == "feat-mvp"
+
+    def test_uses_index_branch(self, tmp_project, task_dir):
+        inst = self._executor_with_branch(tmp_project, task_dir, "feature/BE-1000")
+        assert inst._branch == "feature/BE-1000"
+
+    @pytest.mark.parametrize("branch", ["main", "master", 123, "--force", "-b"])
+    def test_rejects_protected_option_like_or_non_string_branch(self, tmp_project, task_dir, branch):
+        with pytest.raises(SystemExit) as exc_info:
+            self._executor_with_branch(tmp_project, task_dir, branch)
+        assert exc_info.value.code == 1
+
+    def test_checkout_creates_index_branch(self, tmp_project, task_dir):
+        inst = self._executor_with_branch(tmp_project, task_dir, "feature/BE-1000")
+        calls = self._record_git(inst)
+        inst._checkout_branch()
+        assert ("checkout", "-b", "feature/BE-1000") in calls
+
+    def test_already_on_index_branch_skips_checkout(self, tmp_project, task_dir):
+        inst = self._executor_with_branch(tmp_project, task_dir, "feature/BE-1000")
+        calls = self._record_git(inst, current_branch="feature/BE-1000")
+        inst._checkout_branch()
+        assert not any(c[0] == "checkout" for c in calls)
+
+    def test_push_targets_index_branch(self, tmp_project, task_dir, top_index):
+        inst = self._executor_with_branch(tmp_project, task_dir, "feature/BE-1000")
+        inst._auto_push = True
+        calls = self._record_git(inst)
+        inst._finalize()
+        assert ("push", "-u", "origin", "feature/BE-1000") in calls
+
+
+# ---------------------------------------------------------------------------
 # _commit_step (mocked)
 # ---------------------------------------------------------------------------
 

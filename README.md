@@ -14,7 +14,7 @@ flowchart LR
     A["sg-plan<br/>design interview"] -->|plan.md| B["sg-decompose-task<br/>step design"]
     B -->|"step0.md … stepN.md"| C{{"sg-execute-task<br/>orchestrator"}}
     C -->|"Claude or Codex child<br/>per step"| C
-    C -->|"commits to feat-task branch"| D["sg-source-of-truth<br/>knowledge sync"]
+    C -->|"commits to the task branch"| D["sg-source-of-truth<br/>knowledge sync"]
     D -->|"approved doc updates"| E(("done"))
 ```
 
@@ -50,7 +50,7 @@ For each pending step, `skills/sg-execute-task/scripts/execute.py`:
 - passes only completed-step summaries forward, not whole transcripts;
 - validates the final verdict against one shared JSON Schema;
 - retries failures up to three times with the previous error;
-- commits code and state metadata separately on `feat-{task}`;
+- commits code and state metadata separately on the task branch — the per-task index `branch` when set (to follow the project's naming convention), else `feat-{task}`; `main`/`master` are refused;
 - reports progress after every `--once` call;
 - pushes only when `--push` was explicitly requested.
 
