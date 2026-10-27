@@ -66,6 +66,7 @@ Only the orchestrator may commit or push; with `--no-commit`, commits are made b
 
 - **On error:** after fixing the cause, set the step `status` back to `"pending"`, remove `error_message`, and rerun.
 - **On blocked:** resolve `blocked_reason`, set `status` back to `"pending"`, remove `blocked_reason`, and rerun.
+- **In review mode (`--no-commit`):** the failed or blocked step's partial edits stay in the worktree, and the rerun refuses to start until the user commits, stashes, or discards them.
 
 ## Next stage
 
