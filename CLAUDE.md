@@ -46,7 +46,7 @@ The workflow nests along **two axes**. Learn them as two pairs:
 ## Invariants (contracts that must never break — every change must pass these)
 
 1. **Target = the git root of cwd**, never the script's own install location.
-2. **Only the orchestrator (`execute.py`) touches git.** Child runtimes must NOT be instructed to commit or push — the preamble explicitly forbids it.
+2. **Only the orchestrator (`execute.py`) touches git.** Child runtimes must NOT be instructed to commit or push — the preamble explicitly forbids it. With `--no-commit` the orchestrator makes no commits (the user commits each step after review), runs one step, and refuses to start while changes outside `docs/sg/` are uncommitted, so two steps never share one diff.
 3. **Step files are self-contained** — no references to external/earlier conversation.
 4. **Naming:** top-index `dir` = `{yyyymmdd}_{task}` (date included) ≠ per-task index `task` field = `{task}` (date excluded, basis for the default `feat-{task}` branch). An optional per-task index `branch` field overrides the branch name so a target project's existing convention can be followed; `main`/`master` and names starting with `-` are always refused.
 5. **Refuse to run if not a git repo.**

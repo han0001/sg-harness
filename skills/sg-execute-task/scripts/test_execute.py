@@ -502,6 +502,107 @@ class TestCommitStep:
 
 
 # ---------------------------------------------------------------------------
+# --no-commit (the user reviews and commits each step)
+# ---------------------------------------------------------------------------
+
+class TestNoCommit:
+    @staticmethod
+    def _record_git(inst, status_stdout="", status_rc=0):
+        calls = []
+        def fake_git(*args):
+            calls.append(args)
+            if args[0] == "status":
+                return MagicMock(returncode=status_rc, stdout=status_stdout, stderr="fatal")
+            if args[:2] == ("diff", "--cached"):
+                return MagicMock(returncode=1, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        inst._run_git = fake_git
+        return calls
+
+    def test_flag_defaults_off(self):
+        parser = ex.build_parser()
+
+        assert parser.parse_args(["task-dir"]).no_commit is False
+        assert parser.parse_args(["task-dir", "--no-commit"]).no_commit is True
+
+    def test_push_with_no_commit_is_rejected(self):
+        with patch("sys.argv", ["execute.py", "task-dir", "--no-commit", "--push"]):
+            with pytest.raises(SystemExit) as exc_info:
+                ex.main()
+        assert exc_info.value.code == 2
+
+    def test_commit_step_touches_no_git(self, executor):
+        executor._no_commit = True
+        calls = self._record_git(executor)
+
+        executor._commit_step(2, "ui")
+
+        assert calls == []
+
+    def test_finalize_skips_the_completion_commit(self, executor, top_index):
+        executor._no_commit = True
+        calls = self._record_git(executor)
+
+        executor._finalize()
+
+        assert calls == []
+        assert "completed_at" in executor._state.load()
+
+    def test_clean_worktree_ignores_harness_state(self, executor):
+        calls = self._record_git(executor)
+
+        executor._require_clean_worktree()
+
+        assert calls == [("status", "--porcelain", "--", ".", ":(exclude)docs/sg")]
+
+    def test_dirty_worktree_exits_1_and_lists_the_changes(self, executor, capsys):
+        self._record_git(executor, status_stdout=" M src/app.kt\n?? src/new.kt\n")
+
+        with pytest.raises(SystemExit) as exc_info:
+            executor._require_clean_worktree()
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "src/app.kt" in out and "src/new.kt" in out
+
+    def test_git_status_failure_exits_1(self, executor):
+        self._record_git(executor, status_rc=128)
+
+        with pytest.raises(SystemExit) as exc_info:
+            executor._require_clean_worktree()
+
+        assert exc_info.value.code == 1
+
+    def test_run_checks_worktree_before_checkout_and_runs_one_step(self, executor, tmp_project):
+        executor._no_commit = True
+        order = []
+        with patch.object(ex, "ROOT", tmp_project), \
+             patch.object(executor._runtime, "preflight", side_effect=lambda: order.append("preflight")), \
+             patch.object(executor._state, "check_blockers", side_effect=lambda: order.append("blockers")), \
+             patch.object(executor, "_require_clean_worktree", side_effect=lambda: order.append("clean")), \
+             patch.object(executor, "_checkout_branch", side_effect=lambda: order.append("checkout")), \
+             patch.object(executor._state, "ensure_created_at", side_effect=lambda: order.append("created_at")), \
+             patch.object(executor, "_execute_all_steps", return_value=False) as steps:
+            executor.run()
+        assert order == ["preflight", "blockers", "clean", "checkout", "created_at"]
+        assert steps.call_args.kwargs["once"] is True
+
+    def test_dirty_worktree_stops_run_before_checkout_and_state(self, executor, tmp_project):
+        executor._no_commit = True
+        before = executor._index_file.read_text()
+        self._record_git(executor, status_stdout=" M src/app.kt\n")
+        with patch.object(ex, "ROOT", tmp_project), \
+             patch.object(executor._runtime, "preflight"), \
+             patch.object(executor, "_checkout_branch") as checkout, \
+             patch.object(executor, "_execute_all_steps") as steps:
+            with pytest.raises(SystemExit) as exc_info:
+                executor.run()
+        assert exc_info.value.code == 1
+        assert checkout.call_count == 0 and steps.call_count == 0
+        assert executor._index_file.read_text() == before   # created_at was never stamped
+
+
+# ---------------------------------------------------------------------------
 # Claude API compatibility and _invoke_claude spawn contract
 # ---------------------------------------------------------------------------
 

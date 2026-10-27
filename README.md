@@ -51,6 +51,7 @@ For each pending step, `skills/sg-execute-task/scripts/execute.py`:
 - validates the final verdict against one shared JSON Schema;
 - retries failures up to three times with the previous error;
 - commits code and state metadata separately on the task branch — the per-task index `branch` when set (to follow the project's naming convention), else `feat-{task}`; `main`/`master` are refused;
+- with `--no-commit`, runs one step and leaves its changes uncommitted for review, and refuses to start while changes outside `docs/sg/` are still uncommitted;
 - reports progress after every `--once` call;
 - pushes only when `--push` was explicitly requested.
 
@@ -129,15 +130,16 @@ From a repository checkout, the executor can also be called directly:
 ```bash
 python3 skills/sg-execute-task/scripts/execute.py 20260830_example --runtime claude --once
 python3 skills/sg-execute-task/scripts/execute.py 20260830_example --runtime codex --once
+python3 skills/sg-execute-task/scripts/execute.py 20260830_example --runtime claude --no-commit
 ```
 
-Use `--push` only on the final call and only when a push is intended.
+Use `--push` only on the final call and only when a push is intended. Use `--no-commit` to review and commit each step yourself; it cannot be combined with `--push`.
 
 ## Safety
 
-- The host obtains one explicit approval before execution because the orchestrator creates/checks out a branch and commits automatically.
+- The host obtains one explicit approval before execution because the orchestrator creates/checks out a branch and commits automatically (unless `--no-commit`).
 - Claude children use disabled permission checks only inside that approved run. Codex children use `workspace-write` and cannot request a new interactive approval.
-- Only `execute.py` may branch, commit, or push. Child agents are told not to run git operations or edit task indexes.
+- Only `execute.py` may branch, commit, or push; with `--no-commit`, the user commits each step after review. Child agents are told not to run git operations or edit task indexes.
 - `hooks/hooks.json` blocks `rm -rf`, `git push --force`, `git reset --hard`, and `DROP TABLE` for supported `PreToolUse` Bash hooks. The core workflow does not depend on the hook being installed.
 - A live smoke test runs child agents and changes a git repository, so it should be performed only with separate explicit approval.
 
