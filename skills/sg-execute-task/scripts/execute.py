@@ -319,7 +319,7 @@ class StepExecutor:
     # The orchestrator commits (and may push) to the task branch, so it must never be a trunk.
     PROTECTED_BRANCHES = ("main", "master")
 
-    def __init__(self, task_dir_name: str, *, auto_push: bool = False,
+    def __init__(self, task_dir_name: str, *, auto_push: bool = False, no_commit: bool = False,
                  runtime: Optional[AgentRuntime] = None):
         self._root = str(ROOT)
         self._tasks_dir = ROOT / "docs" / "sg" / "tasks"
@@ -327,6 +327,7 @@ class StepExecutor:
         self._task_dir_name = task_dir_name
         self._top_index_file = self._tasks_dir / "index.json"
         self._auto_push = auto_push
+        self._no_commit = no_commit
         self._runtime = runtime or get_runtime()
 
         if not self._task_dir.is_dir():
@@ -363,10 +364,13 @@ class StepExecutor:
         self._runtime.preflight()
         self._print_header()
         self._state.check_blockers()
+        if self._no_commit:
+            self._require_clean_worktree()
         self._checkout_branch()
         guardrails = self._load_guardrails()
         self._state.ensure_created_at()
-        all_done = self._execute_all_steps(guardrails, once=once)
+        # Without a commit between steps, a second step would land in the same diff.
+        all_done = self._execute_all_steps(guardrails, once=once or self._no_commit)
         if all_done:
             self._finalize()
 
@@ -422,7 +426,31 @@ class StepExecutor:
 
         print(f"  Branch: {branch}")
 
+    def _require_clean_worktree(self):
+        """With `--no-commit` the user commits each step after review. Refuse to start while
+        changes outside the harness working state (`docs/sg/`) are still uncommitted, so the
+        next step's diff never mixes with the previous one."""
+        r = self._run_git("status", "--porcelain", "--", ".", ":(exclude)docs/sg")
+        if r.returncode != 0:
+            print("  ERROR: git is unavailable or this is not a git repo.")
+            print(f"  {r.stderr.strip()}")
+            sys.exit(1)
+
+        dirty = r.stdout.splitlines()
+        if dirty:
+            print("  ERROR: uncommitted changes found (--no-commit).")
+            for line in dirty[:10]:
+                print(f"    {line}")
+            if len(dirty) > 10:
+                print(f"    ... and {len(dirty) - 10} more")
+            print("  Hint: review and commit (or stash) the previous step's changes, then rerun.")
+            sys.exit(1)
+
     def _commit_step(self, step_num: int, step_name: str):
+        if self._no_commit:
+            print("  Commit: skipped (--no-commit) — changes left in the working tree")
+            return
+
         output_rel = f"docs/sg/tasks/{self._task_dir_name}/step{step_num}-output.json"
         index_rel = f"docs/sg/tasks/{self._task_dir_name}/index.json"
 
@@ -526,6 +554,8 @@ class StepExecutor:
         print(f"  Task: {self._task_name} | Steps: {self._total}")
         if self._auto_push:
             print(f"  Auto-push: enabled")
+        if self._no_commit:
+            print(f"  Commit: disabled (--no-commit) — runs one step, then stops for review")
         print(f"{'='*60}")
 
     # --- execution loop ---
@@ -610,12 +640,13 @@ class StepExecutor:
         self._state.mark_task_completed()
         self._state.update_top_index("completed")
 
-        self._run_git("add", "-A")
-        if self._run_git("diff", "--cached", "--quiet").returncode != 0:
-            msg = f"chore({self._task_name}): mark task completed"
-            r = self._run_git("commit", "-m", msg)
-            if r.returncode == 0:
-                print(f"  ✓ {msg}")
+        if not self._no_commit:
+            self._run_git("add", "-A")
+            if self._run_git("diff", "--cached", "--quiet").returncode != 0:
+                msg = f"chore({self._task_name}): mark task completed"
+                r = self._run_git("commit", "-m", msg)
+                if r.returncode == 0:
+                    print(f"  ✓ {msg}")
 
         if self._auto_push:
             branch = self._branch
@@ -636,6 +667,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--push", action="store_true", help="Push branch after completion")
     parser.add_argument("--once", action="store_true", help="Run only the next pending step, then exit")
     parser.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Leave the step's changes uncommitted for review (runs one step, like --once)",
+    )
+    parser.add_argument(
         "--runtime",
         choices=("claude", "codex"),
         default="claude",
@@ -645,11 +681,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.push and args.no_commit:
+        parser.error("--push cannot be combined with --no-commit")
 
     StepExecutor(
         args.task_dir,
         auto_push=args.push,
+        no_commit=args.no_commit,
         runtime=get_runtime(args.runtime),
     ).run(once=args.once)
 
