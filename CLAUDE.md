@@ -27,6 +27,8 @@ The workflow nests along **two axes**. Learn them as two pairs:
 
 ## Layout (flat — `skills/` and `hooks/` live at the repo root)
 
+- `skills/sg-recon/` — optional **recon** stage before design (Claude Code only): read-only `sg-prober` subagents gather facts the code alone cannot reveal; the report stays in the conversation. Writes no files.
+- `agents/sg-prober.md` — the read-only probe subagent used by `sg-recon` (`Write`/`Edit`/`NotebookEdit` disallowed).
 - `skills/sg-plan/` — **design** stage: runs a self-contained interview, writes `docs/sg/plan/{yyyymmdd}_{task}/plan.md`. Does not implement.
 - `skills/sg-decompose-task/` — **decompose** stage: splits `plan.md` into steps and writes the `docs/sg/tasks/{yyyymmdd}_{task}/` files (index.json + step files). Does not run anything.
 - `skills/sg-execute-task/` — **execute** stage: runs one isolated Claude or Codex child per step via `scripts/execute.py`. Runtime adapters live under `scripts/runtimes/`; the shared verdict schema lives under `scripts/schemas/`.

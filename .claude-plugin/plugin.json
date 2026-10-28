@@ -1,6 +1,6 @@
 {
   "name": "sg-harness",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "A provider-neutral workflow for design, decomposition, sequential child-agent execution, and knowledge sync.",
   "author": { "name": "han0001" },
   "homepage": "https://github.com/han0001/sg-harness",
