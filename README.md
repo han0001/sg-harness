@@ -146,7 +146,7 @@ Use `--push` only on the final call and only when a push is intended. Use `--no-
 - Claude children use disabled permission checks only inside that approved run. Codex children use `workspace-write` and cannot request a new interactive approval.
 - Only `execute.py` may branch, commit, or push; with `--no-commit`, the user commits each step after review. Child agents are told not to run git operations or edit task indexes.
 - `hooks/hooks.json` blocks `rm -rf`, `git push --force`, `git reset --hard`, and `DROP TABLE` for supported `PreToolUse` Bash hooks. The core workflow does not depend on the hook being installed.
-- `sg-recon` changes nothing: its `sg-prober` subagents cannot use `Write`, `Edit`, or `NotebookEdit`, are told to run and query only to observe, and return personal data or secrets only aggregated or masked.
+- `sg-recon` is read-only by instruction: its `sg-prober` subagents cannot use `Write`, `Edit`, or `NotebookEdit`, but Bash and MCP write tools remain available and are restricted only by the prompt (run and query only to observe). Personal data and secrets are returned only aggregated or masked.
 - A live smoke test runs child agents and changes a git repository, so it should be performed only with separate explicit approval.
 
 ## Repository layout
