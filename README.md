@@ -11,6 +11,7 @@ sg-harness turns a large task into small, self-contained steps and runs each ste
 
 ```mermaid
 flowchart LR
+    R["sg-recon<br/>context gathering<br/>(optional, Claude Code)"] -.->|"report in conversation"| A
     A["sg-plan<br/>design interview"] -->|plan.md| B["sg-decompose-task<br/>step design"]
     B -->|"step0.md … stepN.md"| C{{"sg-execute-task<br/>orchestrator"}}
     C -->|"Claude or Codex child<br/>per step"| C
@@ -20,12 +21,15 @@ flowchart LR
 
 | Stage | Skill | Input | Output |
 |---|---|---|---|
+| Recon (optional) | `sg-recon` | goal + read-only probes (run, test, query) | evidence report in the conversation; no files |
 | Design | `sg-plan` | user intent + repository docs | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` |
 | Decompose | `sg-decompose-task` | approved `plan.md` | `docs/sg/tasks/{yyyymmdd}_{task}/step*.md` |
 | Execute | `sg-execute-task` | task index + step files | isolated child runs, normalized verdicts, commits |
 | Knowledge sync | `sg-source-of-truth` | plan + task-owned git changes | proposed permanent-doc updates |
 
 The planning interview is self-contained: it reads the repository first, asks one dependency-ordered question at a time with a recommendation, and waits for explicit approval before creating the plan. No external GrillMe skill is required.
+
+`sg-recon` is an optional, **Claude Code-only** stage for facts the code alone cannot reveal. The main session lists the unknowns, gets one approval for the list, and sends each question to a read-only `sg-prober` subagent, which returns a short verdict with an evidence grade and a deterministic repro. Raw output stays inside the subagents, so the main context holds only the ledger.
 
 ## Host and runtime
 
@@ -117,6 +121,7 @@ Run the stages from the root of the target git repository.
 In Claude Code, invoke the installed skills as slash commands:
 
 ```text
+/sg-recon            # optional, Claude Code only
 /sg-plan
 /sg-decompose-task
 /sg-execute-task
@@ -141,13 +146,16 @@ Use `--push` only on the final call and only when a push is intended. Use `--no-
 - Claude children use disabled permission checks only inside that approved run. Codex children use `workspace-write` and cannot request a new interactive approval.
 - Only `execute.py` may branch, commit, or push; with `--no-commit`, the user commits each step after review. Child agents are told not to run git operations or edit task indexes.
 - `hooks/hooks.json` blocks `rm -rf`, `git push --force`, `git reset --hard`, and `DROP TABLE` for supported `PreToolUse` Bash hooks. The core workflow does not depend on the hook being installed.
+- `sg-recon` changes nothing: its `sg-prober` subagents cannot use `Write`, `Edit`, or `NotebookEdit`, are told to run and query only to observe, and return personal data or secrets only aggregated or masked.
 - A live smoke test runs child agents and changes a git repository, so it should be performed only with separate explicit approval.
 
 ## Repository layout
 
 ```text
 sg-harness/
+├── agents/sg-prober.md
 ├── skills/
+│   ├── sg-recon/SKILL.md
 │   ├── sg-plan/SKILL.md
 │   ├── sg-decompose-task/SKILL.md
 │   ├── sg-execute-task/
