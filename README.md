@@ -22,7 +22,7 @@ flowchart LR
 | Stage | Skill | Input | Output |
 |---|---|---|---|
 | Recon (optional) | `sg-recon` | goal + read-only probes (run, test, query) | evidence report in the conversation; no files |
-| Design | `sg-plan` | user intent + repository docs | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` |
+| Design | `sg-plan` | user intent + repository docs | `docs/sg/plan/{yyyymmdd}_{task}/plan.md` + `plan.html` (human-readable view) |
 | Decompose | `sg-decompose-task` | approved `plan.md` | `docs/sg/tasks/{yyyymmdd}_{task}/step*.md` |
 | Execute | `sg-execute-task` | task index + step files | isolated child runs, normalized verdicts, commits |
 | Knowledge sync | `sg-source-of-truth` | plan + task-owned git changes | proposed permanent-doc updates |
